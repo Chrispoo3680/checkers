@@ -1,19 +1,17 @@
-import yaml
-from tqdm import tqdm
 import logging
-
 import os
 import sys
-from pathlib import Path
-from zipfile import ZipFile
-import pandas as pd
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional, Union
+from zipfile import ZipFile
+
+import torch
+import yaml
+from tqdm import tqdm
 
 repo_root_dir: Path = Path(__file__).parent.parent.parent
 sys.path.append(str(repo_root_dir))
-
-
-from typing import Any, Callable, cast, Dict, List, Optional, Tuple, Union
 
 
 class TqdmLoggingHandler(logging.Handler):
@@ -78,51 +76,52 @@ def rename_and_unzip_file(
     os.remove(zip_file_path)
 
 
-def get_part_cat(part_id: str, id_to_cat: Dict[str, int]) -> int:
+def decode_fen_pos(fen: str) -> torch.Tensor:
+    """
+    Decodes a FEN string into a torch.tuple with size (12, 8, 8),
+    where the channels is the different piece types.
+    """
 
-    # Predefine possible suffixes
-    possible_letters = ["", "a", "b", "c"]
+    pieces = "rnbqkpRNBQKP"
 
-    # Split the part ID into slices
-    part_slices = part_id.split("_")
+    decoded_board = torch.zeros((12, 8, 8), dtype=torch.float32)
 
-    for part_slice in part_slices:
-        # Extract the numeric part and suffix
-        part_num, part_letter = (
-            (part_slice[:-1], part_slice[-1])
-            if part_slice[-1] in possible_letters
-            else (part_slice, "")
-        )
+    for row_idx, row in enumerate(fen.split("/")):
+        col_idx = 0
+        for char in row:
+            if char.isdigit():
+                col_idx += int(char)  # Skip empty squares
+            else:
+                piece_idx = pieces.index(char)
+                decoded_board[piece_idx, row_idx, col_idx] = 1.0
+                col_idx += 1
 
-        # Generate possible part IDs to check
-        candidate_ids = [
-            part_num + letter
-            for letter in [part_letter]
-            + [l for l in possible_letters if l != part_letter]
-        ]
-
-        for candidate_id in candidate_ids:
-            if candidate_id in id_to_cat:
-                return id_to_cat[candidate_id]
-
-    logging.error(f"Couldn't find any part categories for part with id: {part_id}\n\n")
-    return 0
+    return decoded_board
 
 
-def part_cat_csv_to_dict(part_to_cat_path: Union[str, Path]) -> Dict[str, int]:
-    part_df = pd.read_csv(part_to_cat_path, sep=",")
-
-    part_nums = part_df["part_num"].to_numpy()
-    part_cat_ids = part_df["part_cat_id"].to_numpy()
-
-    num_to_cat: Dict[str, int] = {num: cat for num, cat in zip(part_nums, part_cat_ids)}
-
-    return num_to_cat
+def square_to_index(square):
+    file = ord(square[0]) - ord("a")
+    rank = int(square[1]) - 1
+    return rank * 8 + file
 
 
-def read_file(path) -> str:
-    with open(path, "r") as f:
-        return f.read()
+def encode_USI_to_int(move_uci):
+    """
+    move_uci example:
+    "e2e4"
+    "e7e8q"
+    """
+
+    PROMOTION_MAP = {None: 0, "n": 1, "b": 2, "r": 3, "q": 4}
+
+    from_sq = square_to_index(move_uci[:2])
+    to_sq = square_to_index(move_uci[2:4])
+
+    promotion = move_uci[4] if len(move_uci) == 5 else None
+    promo_id = PROMOTION_MAP[promotion]
+
+    index = from_sq * 64 * 5 + to_sq * 5 + promo_id
+    return index
 
 
 @contextmanager

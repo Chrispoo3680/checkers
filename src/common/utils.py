@@ -2,16 +2,15 @@
 Contains various utility functions for PyTorch model training and saving.
 """
 
-import torch
-from torch.utils.tensorboard.writer import SummaryWriter
-import torch.distributed as dist
-
 import os
 from pathlib import Path
+from typing import Any, Dict, List, Union
+
+import torch
+import torch.distributed as dist
+from torch.utils.tensorboard.writer import SummaryWriter
+
 from . import tools
-
-from typing import List, Union, Dict, Any, Optional
-
 
 try:
     logging_file_path = os.environ["LOGGING_FILE_PATH"]
