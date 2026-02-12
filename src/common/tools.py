@@ -84,6 +84,7 @@ def decode_fen_pos(fen: str) -> torch.Tensor:
     Decodes a FEN string into a torch.tuple with size (12, 8, 8),
     where the channels is the different piece types.
     """
+    print(fen)
 
     pieces = "rnbqkpRNBQKP"
 
