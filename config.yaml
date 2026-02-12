@@ -1,0 +1,24 @@
+# DATA
+data_path: ../data/
+
+# CLASSIFICATION DATASETS
+stockfish_dataset_url: https://www.kaggle.com/datasets/yousefradwanlmao/stockfish-best-moves-compilation
+stockfish_dataset_handle: yousefradwanlmao/stockfish-best-moves-compilation
+stockfish_dataset_name: stockfish-best-moves-compilation
+
+# MODELS
+model_path: models/
+
+# CHECKPOINTS
+temp_checkpoint_path: temp_checkpoints/
+
+# RESULTS
+results_path: results/
+
+# LOGGING
+logging_path: logs/
+logging_level: debug
+
+# API KEYS
+kaggle_username: YOUR KAGGLE USERNAME # Instructions on how to get in "/src/data/download.py".
+kaggle_api_key: INSERT API KEY HERE # Instructions on how to get in "/src/data/download.py".

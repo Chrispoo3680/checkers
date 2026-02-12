@@ -13,6 +13,9 @@ from tqdm import tqdm
 repo_root_dir: Path = Path(__file__).parent.parent.parent
 sys.path.append(str(repo_root_dir))
 
+PROMOTION_MAP = {None: 0, "n": 1, "b": 2, "r": 3, "q": 4}
+INDEX_TO_PROMO = {v: k for k, v in PROMOTION_MAP.items()}
+
 
 class TqdmLoggingHandler(logging.Handler):
     def emit(self, record) -> None:
@@ -105,14 +108,18 @@ def square_to_index(square):
     return rank * 8 + file
 
 
+def index_to_square(index):
+    file = index % 8
+    rank = index // 8
+    return chr(file + ord("a")) + str(rank + 1)
+
+
 def encode_USI_to_int(move_uci):
     """
     move_uci example:
     "e2e4"
     "e7e8q"
     """
-
-    PROMOTION_MAP = {None: 0, "n": 1, "b": 2, "r": 3, "q": 4}
 
     from_sq = square_to_index(move_uci[:2])
     to_sq = square_to_index(move_uci[2:4])
@@ -122,6 +129,25 @@ def encode_USI_to_int(move_uci):
 
     index = from_sq * 64 * 5 + to_sq * 5 + promo_id
     return index
+
+
+def decode_int_to_UCI(index):
+
+    from_sq = index // (64 * 5)
+    remainder = index % (64 * 5)
+
+    to_sq = remainder // 5
+    promo_id = remainder % 5
+
+    from_square = index_to_square(from_sq)
+    to_square = index_to_square(to_sq)
+
+    promotion = INDEX_TO_PROMO[promo_id]
+
+    if promotion is None:
+        return from_square + to_square
+    else:
+        return from_square + to_square + promotion
 
 
 @contextmanager

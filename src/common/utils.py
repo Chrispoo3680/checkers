@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.tensorboard.writer import SummaryWriter
 
@@ -18,6 +19,32 @@ except KeyError:
     logging_file_path = None
 
 logger = tools.create_logger(log_path=logging_file_path, logger_name=__name__)
+
+
+def chess_loss(
+    p_logits,
+    v_pred,
+    pi_target,
+    v_target,
+    value_weight=1.0,
+    entropy_weight=0.01,
+):
+
+    log_probs = F.log_softmax(p_logits, dim=1)
+    probs = torch.exp(log_probs)
+
+    # Policy loss
+    policy_loss = -(pi_target * log_probs).sum(dim=1).mean()
+
+    # Value loss
+    value_loss = F.mse_loss(v_pred, v_target)
+
+    # Entropy bonus
+    entropy = -(probs * log_probs).sum(dim=1).mean()
+
+    total_loss = policy_loss + value_weight * value_loss - entropy_weight * entropy
+
+    return total_loss, policy_loss, value_loss, entropy
 
 
 def ddp_setup(rank, world_size):
@@ -67,7 +94,7 @@ def model_save_version(save_dir_path: Path, save_name: str) -> str:
     files_in_dir: List[str] = os.listdir(save_dir_path)
     version = str(sum([1 for file in files_in_dir if save_name in file]))
 
-    save_name_version: str = f"{save_name}V{version}"
+    save_name_version: str = f"{save_name}{version}"
 
     return save_name_version
 
