@@ -1,20 +1,17 @@
+import os
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 import torch
 from torch import nn
-from torch.utils.tensorboard.writer import SummaryWriter
-from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
-from torch.optim.lr_scheduler import StepLR, MultiStepLR
 from torch.nn.parallel import DistributedDataParallel as DDP
-
-from pathlib import Path
-import os
+from torch.optim.lr_scheduler import MultiStepLR, StepLR
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
 
 from ..common import tools, utils
-
-
-from typing import Dict, List, Optional, Any, Union, Tuple, Callable
-
 
 try:
     logging_file_path = os.environ["LOGGING_FILE_PATH"]
@@ -61,7 +58,7 @@ class Trainer:
 
         self.model.train()
 
-        train_loss, train_acc = 0, 0
+        train_loss = 0
 
         for batch, (X, policy_target, value_target) in enumerate(
             tqdm(
@@ -108,7 +105,7 @@ class Trainer:
 
         self.model.eval()
 
-        test_loss, test_acc = 0, 0
+        test_loss = 0
 
         with torch.autocast(device_type=self.device.type, dtype=torch.float16):
             with torch.inference_mode():

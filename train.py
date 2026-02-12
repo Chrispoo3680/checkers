@@ -2,32 +2,27 @@
 This is a file for training the lego object detection model.
 """
 
-import torch
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.tensorboard.writer import SummaryWriter
-from torch.amp.grad_scaler import GradScaler
-import torch.multiprocessing as mp
-
+import argparse
+import json
+import logging
+import os
 import sys
 from pathlib import Path
+from typing import List
+
+import torch
+import torch.multiprocessing as mp
+from torch.amp.grad_scaler import GradScaler
+from torch.utils.tensorboard.writer import SummaryWriter
 
 repo_root_dir: Path = Path(__file__).parent
 sys.path.append(str(repo_root_dir))
 
-import os
-import logging
-import argparse
-import json
-from functools import partial
-
 from src.common import tools, utils
-from src.preprocess import build_features
+from src.data import download
 from src.model import models
 from src.model.trainer import Trainer
-from src.data import download
-
-from typing import Union, List, Dict
+from src.preprocess import build_features
 
 
 def main(
@@ -69,10 +64,10 @@ def main(
     # Create the classification model
     logger.info("Loading model...")
 
-    model = models.CheckersNetV1(12, 4672)
+    model = models.CheckersNetV1(18, 20480)
 
     # Create train and test dataloaders
-    logger.info(f"Creating dataloaders...")
+    logger.info("Creating dataloaders...")
 
     # Create train/test dataloader
     (train_dataloader, test_dataloader), _ = build_features.create_dataloaders(
@@ -80,7 +75,7 @@ def main(
         batch_size=BATCH_SIZE,
     )
 
-    logger.info(f"Successfully created dataloaders.")
+    logger.info("Successfully created dataloaders.")
 
     # Set loss, optimizer and learning rate scheduling
     loss_fn = utils.chess_loss

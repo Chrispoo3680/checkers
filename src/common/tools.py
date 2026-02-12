@@ -81,24 +81,55 @@ def rename_and_unzip_file(
 
 def decode_fen_pos(fen: str) -> torch.Tensor:
     """
-    Decodes a FEN string into a torch.tuple with size (12, 8, 8),
-    where the channels is the different piece types.
+    Decode FEN into tensor (18, 8, 8)
     """
-    print(fen)
+
+    board_fen, side, castling, ep_square, _, _ = fen.split(" ")
 
     pieces = "rnbqkpRNBQKP"
 
-    decoded_board = torch.zeros((12, 8, 8), dtype=torch.float32)
+    decoded_board = torch.zeros((18, 8, 8), dtype=torch.float32)
 
-    for row_idx, row in enumerate(fen.split("/")):
+    # ---------------- PIECES ----------------
+    for row_idx, row in enumerate(board_fen.split("/")):
         col_idx = 0
+
         for char in row:
             if char.isdigit():
-                col_idx += int(char)  # Skip empty squares
+                col_idx += int(char)
             else:
                 piece_idx = pieces.index(char)
                 decoded_board[piece_idx, row_idx, col_idx] = 1.0
                 col_idx += 1
+
+        # Defensive sanity check (VERY useful)
+        assert col_idx == 8
+
+    # ---------------- SIDE TO MOVE ----------------
+    if side == "w":
+        decoded_board[12, :, :] = 1.0
+
+    # ---------------- CASTLING RIGHTS ----------------
+    if "K" in castling:
+        decoded_board[13, :, :] = 1.0
+
+    if "Q" in castling:
+        decoded_board[14, :, :] = 1.0
+
+    if "k" in castling:
+        decoded_board[15, :, :] = 1.0
+
+    if "q" in castling:
+        decoded_board[16, :, :] = 1.0
+
+    # ---------------- EN PASSANT ----------------
+    if ep_square != "-":
+        ep_idx = square_to_index(ep_square)
+
+        row = ep_idx // 8
+        col = ep_idx % 8
+
+        decoded_board[17, row, col] = 1.0
 
     return decoded_board
 
