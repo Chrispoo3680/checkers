@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import sys
@@ -6,6 +7,9 @@ from pathlib import Path
 from typing import Optional, Union
 from zipfile import ZipFile
 
+import chess
+import chess.pgn
+import pandas as pd
 import torch
 import yaml
 from tqdm import tqdm
@@ -79,16 +83,25 @@ def rename_and_unzip_file(
     os.remove(zip_file_path)
 
 
-def decode_fen_pos(fen: str) -> torch.Tensor:
+def get_files_from_folder(root_folder_path: Union[str, Path], extension: str):
+    data_paths: list[Path] = []
+    for root, _, files in os.walk(root_folder_path):
+        for file_name in files:
+            if file_name.endswith(extension):
+                data_paths.append(Path(root) / file_name)
+    return data_paths
+
+
+def encode_fen_pos(fen: str) -> torch.Tensor:
     """
-    Decode FEN into tensor (18, 8, 8)
+    Encode FEN into tensor (18, 8, 8)
     """
 
     board_fen, side, castling, ep_square, _, _ = fen.split(" ")
 
-    pieces = "rnbqkpRNBQKP"
+    pieces = "RNBQKPrnbqkp"
 
-    decoded_board = torch.zeros((18, 8, 8), dtype=torch.float32)
+    encoded_board = torch.zeros((18, 8, 8), dtype=torch.float32)
 
     # ---------------- PIECES ----------------
     for row_idx, row in enumerate(board_fen.split("/")):
@@ -99,7 +112,7 @@ def decode_fen_pos(fen: str) -> torch.Tensor:
                 col_idx += int(char)
             else:
                 piece_idx = pieces.index(char)
-                decoded_board[piece_idx, row_idx, col_idx] = 1.0
+                encoded_board[piece_idx, row_idx, col_idx] = 1.0
                 col_idx += 1
 
         # Defensive sanity check (VERY useful)
@@ -107,20 +120,20 @@ def decode_fen_pos(fen: str) -> torch.Tensor:
 
     # ---------------- SIDE TO MOVE ----------------
     if side == "w":
-        decoded_board[12, :, :] = 1.0
+        encoded_board[12, :, :] = 1.0
 
     # ---------------- CASTLING RIGHTS ----------------
     if "K" in castling:
-        decoded_board[13, :, :] = 1.0
+        encoded_board[13, :, :] = 1.0
 
     if "Q" in castling:
-        decoded_board[14, :, :] = 1.0
+        encoded_board[14, :, :] = 1.0
 
     if "k" in castling:
-        decoded_board[15, :, :] = 1.0
+        encoded_board[15, :, :] = 1.0
 
     if "q" in castling:
-        decoded_board[16, :, :] = 1.0
+        encoded_board[16, :, :] = 1.0
 
     # ---------------- EN PASSANT ----------------
     if ep_square != "-":
@@ -129,29 +142,33 @@ def decode_fen_pos(fen: str) -> torch.Tensor:
         row = ep_idx // 8
         col = ep_idx % 8
 
-        decoded_board[17, row, col] = 1.0
+        encoded_board[17, row, col] = 1.0
 
-    return decoded_board
+    return encoded_board
 
 
 def square_to_index(square):
     file = ord(square[0]) - ord("a")
     rank = int(square[1]) - 1
+
+    rank = 7 - rank
+
     return rank * 8 + file
 
 
 def index_to_square(index):
     file = index % 8
     rank = index // 8
+
+    rank = 7 - rank
+
     return chr(file + ord("a")) + str(rank + 1)
 
 
-def encode_USI_to_int(move_uci):
-    """
-    move_uci example:
-    "e2e4"
-    "e7e8q"
-    """
+def encode_UCI_to_int(move_uci):
+
+    if not isinstance(move_uci, str):
+        raise ValueError(f"Invalid move type: {move_uci} ({type(move_uci)})")
 
     from_sq = square_to_index(move_uci[:2])
     to_sq = square_to_index(move_uci[2:4])
@@ -180,6 +197,126 @@ def decode_int_to_UCI(index):
         return from_square + to_square
     else:
         return from_square + to_square + promotion
+
+
+def expand_game_positions(puzzles_df, fen_col="FEN", moves_col="Moves"):
+    """
+    Expand chess games into individual position-move pairs.
+
+    Parameters:
+    -----------
+    puzzles_df : pd.DataFrame
+        DataFrame containing chess games with FEN positions and move sequences
+    fen_col : str
+        Name of the column containing FEN positions (default: 'FEN')
+    moves_col : str
+        Name of the column containing move sequences (default: 'Moves')
+
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with columns 'fen' and 'move', one row per move in each game
+    """
+    expanded_data = []
+
+    for _, row in tqdm(puzzles_df.iterrows()):
+        board = chess.Board(row[fen_col])
+
+        # Split moves if it's a string, otherwise assume it's already a list
+        if isinstance(row[moves_col], str):
+            moves = row[moves_col].split()
+        else:
+            moves = row[moves_col]
+
+        for move_uci in moves:
+            # Store current position and move
+            expanded_data.append({"fen": board.fen(), "move": move_uci})
+
+            # Make the move to get to next position
+            try:
+                move = chess.Move.from_uci(move_uci)
+                board.push(move)
+            except ValueError:
+                # Skip invalid moves
+                continue
+
+    return pd.DataFrame(expanded_data)
+
+
+def _StrictGameBuilder():
+    """GameBuilder that flags games containing illegal moves."""
+
+    class Builder(chess.pgn.GameBuilder):
+        def __init__(self):
+            super().__init__()
+            self.has_error = False
+
+        def handle_error(self, error):
+            self.has_error = True
+
+    return Builder()
+
+
+def expand_game_positions_san(games_df, moves_col="Moves"):
+    """
+    Expand chess games into individual position-move pairs, where moves are in SAN notation.
+
+    Handles full PGN move text including move numbers, comments in {}, variations
+    in (), and result tokens. Only the main line is expanded.
+
+    Parameters:
+    -----------
+    games_df : pd.DataFrame
+        DataFrame containing chess games with FEN positions and move sequences in SAN notation
+    fen_col : str
+        Name of the column containing FEN positions (default: 'FEN')
+    moves_col : str
+        Name of the column containing move sequences in SAN notation (default: 'Moves')
+
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with columns 'fen' and 'move', one row per move in each game,
+        with moves converted to UCI notation.
+    """
+    fens = []
+    moves_out = []
+
+    for moves_str in tqdm(games_df[moves_col]):
+        visitor = _StrictGameBuilder()
+        game = chess.pgn.read_game(io.StringIO(moves_str), Visitor=lambda: visitor)
+
+        if game is None or visitor.has_error:
+            continue
+
+        board = game.board()
+        for move in game.mainline_moves():
+            fens.append(board.fen())
+            moves_out.append(move.uci())
+            board.push(move)
+
+    return pd.DataFrame({"fen": fens, "move": moves_out})
+
+
+def convert_san_to_uci(fen: str, san_move: str) -> str:
+    """
+    Convert a SAN chess move to UCI notation given the current board position.
+
+    Parameters:
+    -----------
+    fen : str
+        FEN string representing the current board position.
+    san_move : str
+        Move in Standard Algebraic Notation (e.g., 'Nf3', 'e4', 'O-O').
+
+    Returns:
+    --------
+    str
+        Move in UCI notation (e.g., 'g1f3', 'e2e4', 'e1g1').
+    """
+    board = chess.Board(fen)
+    move = board.parse_san(san_move)
+    return move.uci()
 
 
 @contextmanager

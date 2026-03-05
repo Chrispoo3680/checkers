@@ -1,8 +1,9 @@
 import os
 from pathlib import Path
 
+import pandas as pd
 import torch
-from torch.utils.data import DataLoader, random_split, ConcatDataset
+from torch.utils.data import ConcatDataset, DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from .datasets import ChessDataset
@@ -19,7 +20,33 @@ def create_dataloaders(
     # Make data folders into dataset
     independent_datasets: list[ChessDataset] = []
     for path in data_dir_paths:
-        independent_datasets.append(ChessDataset(data_path=path))
+        # puzzles_df = pd.read_parquet(path, columns=["FEN", "Moves"])
+        # expanded_df = tools.expand_game_positions(puzzles_df[:10000])
+        # expanded_df["evaluation"] = None
+
+        # games_df = pd.read_csv(
+        #     path,
+        #     usecols=["moves"],
+        # ).dropna()
+        # expanded_df = tools.expand_game_positions_san(
+        #     games_df[5000:10000], moves_col="moves"
+        # )
+        # expanded_df["evaluation"] = None
+
+        games_df = pd.read_csv(
+            path,
+            usecols=["Position", "Best Move", "Evaluation"],
+        ).dropna()
+        games_df.rename(
+            columns={
+                "Position": "fen",
+                "Best Move": "move",
+                "Evaluation": "evaluation",
+            },
+            inplace=True,
+        )
+
+        independent_datasets.append(ChessDataset(data_df=games_df))
 
     full_dataset = ConcatDataset(independent_datasets)
 
