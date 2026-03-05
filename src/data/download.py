@@ -4,16 +4,13 @@
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 repo_root_dir: Path = Path(__file__).parent.parent.parent
 sys.path.append(str(repo_root_dir))
 
+from src.common import tools
 import os
-
 import wget
 
-from src.common import tools
 
 config = tools.load_config()
 
@@ -37,7 +34,8 @@ def kaggle_download_data(
 ):
 
     # Set environment variables for Kaggle authentication
-    load_dotenv()
+    os.environ["KAGGLE_USERNAME"] = config["kaggle_username"]
+    os.environ["KAGGLE_KEY"] = config["kaggle_api_key"]
 
     import kaggle
 

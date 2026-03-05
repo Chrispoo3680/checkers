@@ -33,8 +33,6 @@ class Trainer:
         rank: int,
         scaler: GradScaler,
         early_stopping: utils.EarlyStopping,
-        train_policy: bool = True,
-        train_value: bool = True,
         lr_scheduler: Optional[Union[MultiStepLR, StepLR]] = None,
         temp_checkpoint_file_path: Optional[Path] = None,
         writer: Optional[SummaryWriter] = None,
@@ -42,11 +40,9 @@ class Trainer:
 
         self.device = device
         self.rank = rank
-        self.model = DDP(model.to(rank), device_ids=[rank], find_unused_parameters=True)
+        self.model = DDP(model.to(rank), device_ids=[rank])
         self.optimizer = optimizer
         self.loss_fn = loss_fn
-        self.train_policy = train_policy
-        self.train_value = train_value
         self.train_dataloader = train_dataloader
         self.test_dataloader = test_dataloader
         self.scaler = scaler
@@ -64,35 +60,32 @@ class Trainer:
 
         train_loss = 0
 
-        for batch, (X, pi_target, value_target) in enumerate(
+        for batch, (X, policy_target, value_target) in enumerate(
             tqdm(
                 self.train_dataloader,
                 position=1,
                 leave=False,
-                desc="Iterating through training batches",
+                desc="Iterating through training batches.",
                 disable=self.rank != 0,
             )
         ):
             with torch.autocast(device_type=self.device.type, dtype=torch.float16):
-                X, pi_target, value_target = (
+                X, policy_target, value_target = (
                     X.to(self.rank),
-                    pi_target.to(self.rank),
+                    policy_target.to(self.rank),
                     value_target.to(self.rank),
                 )
 
                 policy_logist, value_pred = self.model(X)
 
-                loss, policy_loss, value_loss, entropy = self.loss_fn(
+                loss = self.loss_fn(
                     policy_logist,
                     value_pred,
-                    pi_target if self.train_policy else None,
-                    value_target if self.train_value else None,
-                    value_weight=0.5,
+                    policy_target,
+                    value_target,
                 )
 
-                train_loss += loss.item()
-
-            self.optimizer.zero_grad(set_to_none=True)
+                train_loss += loss
 
             self.scaler.scale(loss).backward()
 
@@ -101,6 +94,8 @@ class Trainer:
             scale = self.scaler.get_scale()
             self.scaler.update()
             self.skip_lr_sched = scale != self.scaler.get_scale()
+
+            self.optimizer.zero_grad(set_to_none=True)
 
         return train_loss
 
@@ -114,32 +109,31 @@ class Trainer:
 
         with torch.autocast(device_type=self.device.type, dtype=torch.float16):
             with torch.inference_mode():
-                for batch, (X, pi_target, value_target) in enumerate(
+                for batch, (X, policy_target, value_target) in enumerate(
                     tqdm(
                         self.test_dataloader,
                         position=1,
                         leave=False,
-                        desc="Iterating through testing batches",
+                        desc="Iterating through testing batches.",
                         disable=self.rank != 0,
                     )
                 ):
-                    X, pi_target, value_target = (
+                    X, policy_target, value_target = (
                         X.to(self.rank),
-                        pi_target.to(self.rank),
+                        policy_target.to(self.rank),
                         value_target.to(self.rank),
                     )
 
                     policy_logist, value_pred = self.model(X)
 
-                    loss, policy_loss, value_loss, entropy = self.loss_fn(
+                    loss = self.loss_fn(
                         policy_logist,
                         value_pred,
-                        pi_target if self.train_policy else None,
-                        value_target if self.train_value else None,
-                        value_weight=0.5,
+                        policy_target,
+                        value_target,
                     )
 
-                    test_loss += loss.item()
+                    test_loss += loss
 
         return test_loss
 
@@ -154,7 +148,7 @@ class Trainer:
         for epoch in tqdm(
             range(epochs),
             position=0,
-            desc="Iterating through epochs",
+            desc="Iterating through epochs.",
             disable=self.rank != 0,
         ):
             train_loss = self.train_step(epoch)

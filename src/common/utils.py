@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from . import tools
@@ -24,27 +24,25 @@ logger = tools.create_logger(log_path=logging_file_path, logger_name=__name__)
 def chess_loss(
     p_logits,
     v_pred,
-    pi_target=None,
-    v_target=None,
+    pi_target,
+    v_target,
     value_weight=1.0,
     entropy_weight=0.01,
 ):
 
     log_probs = F.log_softmax(p_logits, dim=1)
+    probs = torch.exp(log_probs)
 
-    policy_loss = None
-    value_loss = None
-    entropy = None
-    total_loss = 0
+    # Policy loss
+    policy_loss = -(pi_target * log_probs).sum(dim=1).mean()
 
-    if pi_target is not None:
-        policy_loss = -(pi_target * log_probs).sum(dim=1).mean()
-        entropy = -(log_probs.exp() * log_probs).sum(dim=1).mean()
-        total_loss = total_loss + policy_loss - entropy_weight * entropy
+    # Value loss
+    value_loss = F.mse_loss(v_pred, v_target)
 
-    if v_target is not None:
-        value_loss = F.mse_loss(v_pred, v_target)
-        total_loss = total_loss + value_weight * value_loss
+    # Entropy bonus
+    entropy = -(probs * log_probs).sum(dim=1).mean()
+
+    total_loss = policy_loss + value_weight * value_loss - entropy_weight * entropy
 
     return total_loss, policy_loss, value_loss, entropy
 

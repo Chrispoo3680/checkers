@@ -30,12 +30,8 @@ class ResidualBlock(nn.Module):
 
 
 class CheckersNetV1(nn.Module):
-    def __init__(
-        self, input_planes, policy_planes, channels=64, num_blocks=8, temperature=1.0
-    ):
+    def __init__(self, input_planes, policy_planes, channels=64, num_blocks=8):
         super().__init__()
-
-        self.temperature = temperature
 
         # Initial convolution
         self.conv_input = nn.Conv2d(input_planes, channels, kernel_size=3, padding=1)
@@ -88,4 +84,4 @@ class CheckersNetV1(nn.Module):
         v = self.value_fc2(v)
         v = torch.tanh(v)  # bounded evaluation
 
-        return p / self.temperature, v
+        return p, v
