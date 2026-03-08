@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -30,14 +31,13 @@ def chess_loss(
     entropy_weight=0.01,
 ):
 
-    log_probs = F.log_softmax(p_logits, dim=1)
-
     policy_loss = None
     value_loss = None
     entropy = None
-    total_loss = 0
+    total_loss = torch.zeros(1, device=p_logits.device, dtype=p_logits.dtype)
 
     if pi_target is not None:
+        log_probs = F.log_softmax(p_logits, dim=1)
         policy_loss = -(pi_target * log_probs).sum(dim=1).mean()
         entropy = -(log_probs.exp() * log_probs).sum(dim=1).mean()
         total_loss = total_loss + policy_loss - entropy_weight * entropy
@@ -47,6 +47,107 @@ def chess_loss(
         total_loss = total_loss + value_weight * value_loss
 
     return total_loss, policy_loss, value_loss, entropy
+
+
+def value_correlation(v_pred, v_target):
+
+    v_pred = v_pred.view(-1)
+    v_target = v_target.view(-1)
+
+    v_pred = v_pred - v_pred.mean()
+    v_target = v_target - v_target.mean()
+
+    numerator = torch.sum(v_pred * v_target)
+    denominator = torch.sqrt(torch.sum(v_pred**2) * torch.sum(v_target**2))
+    denominator = torch.clamp(denominator, min=1e-8)
+
+    corr = numerator / denominator
+
+    return corr.item()
+
+
+def value_sign_accuracy(v_pred, v_target):
+
+    pred_sign = torch.sign(v_pred)
+    target_sign = torch.sign(v_target)
+
+    correct = (pred_sign == target_sign).float().mean()
+
+    return correct.item()
+
+
+def validation_score(correlation, sign_accuracy):
+    return 0.7 * correlation + 0.3 * sign_accuracy
+
+
+def policy_top1_accuracy(policy_logits, pi_target, legal_mask=None):
+    """Returns (correct_count, total_count) for top-1 policy accuracy.
+    Optionally masks illegal moves before taking the argmax of logits."""
+    if legal_mask is not None:
+        policy_logits = policy_logits.masked_fill(legal_mask == 0, float("-inf"))
+    pred_top1 = torch.argmax(policy_logits, dim=1)
+    target_top1 = torch.argmax(pi_target, dim=1)
+    correct = (pred_top1 == target_top1).sum().item()
+    total = pi_target.size(0)
+    return correct, total
+
+
+def policy_top3_accuracy(policy_logits, pi_target, legal_mask=None):
+    """Returns (correct_count, total_count) for top-3 policy accuracy.
+    A prediction is correct if the model's top-1 move is among the top-3
+    moves in pi_target with non-zero probability. Handles positions with
+    fewer than 3 legal moves correctly."""
+    if legal_mask is not None:
+        policy_logits = policy_logits.masked_fill(legal_mask == 0, float("-inf"))
+    pred_top1 = torch.argmax(policy_logits, dim=1).unsqueeze(1)  # (B, 1)
+
+    k = min(3, pi_target.size(1))
+    top3 = torch.topk(pi_target, k=k, dim=1)
+    target_top3_indices = top3.indices  # (B, k)
+    target_top3_probs = top3.values  # (B, k)
+
+    match = (pred_top1 == target_top3_indices) & (target_top3_probs > 0)
+    correct = match.any(dim=1).sum().item()
+    total = pi_target.size(0)
+    return correct, total
+
+
+def create_policy_distribution_with_smoothing(
+    top_move_indices: list[int],
+    legal_move_indices: list[int],
+    policy_size: int = 20480,
+    epsilon: float = 0.02,
+):
+    """
+    Creates a policy distribution with smoothing.
+
+    Args:
+        top_move_indices: indices of top moves from Stockfish
+        legal_move_indices: indices of all legal moves
+        epsilon: probability mass for non-top moves
+
+    Returns:
+        A tensor of shape (policy_size,) representing the policy distribution.
+    """
+
+    policy = torch.zeros(policy_size, dtype=torch.float32)
+
+    k = len(top_move_indices)
+    base_weights = torch.tensor([0.5, 0.2, 0.15, 0.1, 0.05][:k])
+    base_weights = base_weights / base_weights.sum()
+
+    top_indices = torch.tensor(top_move_indices, dtype=torch.long)
+    policy[top_indices] = (1 - epsilon) * base_weights
+
+    legal_indices = torch.tensor(legal_move_indices, dtype=torch.long)
+    other_indices = legal_indices[~torch.isin(legal_indices, top_indices)]
+
+    if other_indices.numel() > 0:
+        policy[other_indices] = epsilon / other_indices.numel()
+
+    policy = policy / policy.sum()
+
+    return policy
 
 
 def ddp_setup(rank, world_size):
@@ -137,27 +238,31 @@ class EarlyStopping:
         """
         self.patience: int = patience
         self.delta: float = delta
-        self.best_score: float = float("inf")
+        self.best_score: float = float("-inf")
         self.best_score_epoch: int = 0
         self.early_stop: bool = False
         self.counter: int = 0
         self.best_model_state: Dict[str, Any] = {}
+        self.last_3_scores: list[float] = []
 
     def __call__(self, val_loss, model, epoch) -> None:
         score = val_loss
-        if self.best_score is None:
-            self.best_score = score
-            self.best_score_epoch = epoch
-            self.best_model_state = model.state_dict()
-        elif score > self.best_score - self.delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = score
+
+        self.last_3_scores.append(score)
+        if len(self.last_3_scores) > 3:
+            self.last_3_scores.pop(0)
+
+        score_ma = float(np.mean(self.last_3_scores))
+
+        if score_ma > self.best_score + self.delta:
+            self.best_score = score_ma
             self.best_score_epoch = epoch
             self.best_model_state = model.state_dict()
             self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
 
     def load_best_model(self, model) -> None:
         model.load_state_dict(self.best_model_state)

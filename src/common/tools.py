@@ -83,11 +83,11 @@ def rename_and_unzip_file(
     os.remove(zip_file_path)
 
 
-def get_files_from_folder(root_folder_path: Union[str, Path], extension: str):
+def get_files_from_folder(root_folder_path: Union[str, Path], extensions: list[str]):
     data_paths: list[Path] = []
     for root, _, files in os.walk(root_folder_path):
         for file_name in files:
-            if file_name.endswith(extension):
+            if file_name.endswith(tuple(extensions)):
                 data_paths.append(Path(root) / file_name)
     return data_paths
 
@@ -230,7 +230,7 @@ def expand_game_positions(puzzles_df, fen_col="FEN", moves_col="Moves"):
 
         for move_uci in moves:
             # Store current position and move
-            expanded_data.append({"fen": board.fen(), "move": move_uci})
+            expanded_data.append({"fen": board.fen(), "moves": move_uci})
 
             # Make the move to get to next position
             try:
@@ -257,7 +257,7 @@ def _StrictGameBuilder():
     return Builder()
 
 
-def expand_game_positions_san(games_df, moves_col="Moves"):
+def expand_game_positions_san(games_df, moves_col="Moves", eval_col="Evaluation"):
     """
     Expand chess games into individual position-move pairs, where moves are in SAN notation.
 
@@ -281,8 +281,11 @@ def expand_game_positions_san(games_df, moves_col="Moves"):
     """
     fens = []
     moves_out = []
+    evaluations = []
 
-    for moves_str in tqdm(games_df[moves_col]):
+    for moves_str, winner in tqdm(
+        zip(games_df[moves_col], games_df[eval_col]), total=len(games_df)
+    ):
         visitor = _StrictGameBuilder()
         game = chess.pgn.read_game(io.StringIO(moves_str), Visitor=lambda: visitor)
 
@@ -290,12 +293,15 @@ def expand_game_positions_san(games_df, moves_col="Moves"):
             continue
 
         board = game.board()
-        for move in game.mainline_moves():
+        for i, move in enumerate(game.mainline_moves()):
             fens.append(board.fen())
             moves_out.append(move.uci())
+            evaluations.append(
+                winner * ((-1) ** (i % 2))
+            )  # +1 for white win, -1 for black win, 0 for draw
             board.push(move)
 
-    return pd.DataFrame({"fen": fens, "move": moves_out})
+    return pd.DataFrame({"fen": fens, "moves": moves_out, "evaluation": evaluations})
 
 
 def convert_san_to_uci(fen: str, san_move: str) -> str:

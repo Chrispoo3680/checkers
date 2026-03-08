@@ -2,10 +2,6 @@
 data_path: data/
 
 # DATASETS
-stockfish_dataset_url: https://www.kaggle.com/datasets/yousefradwanlmao/stockfish-best-moves-compilation
-stockfish_dataset_handle: yousefradwanlmao/stockfish-best-moves-compilation
-stockfish_dataset_name: stockfish_best_moves_compilation
-
 lichess_puzzles_dataset_url: https://www.kaggle.com/datasets/lichess/chess-puzzles
 lichess_puzzles_dataset_handle: lichess/chess-puzzles
 lichess_puzzles_dataset_name: lichess_puzzles
@@ -13,6 +9,10 @@ lichess_puzzles_dataset_name: lichess_puzzles
 magnus_carlsen_games_dataset_url: https://www.kaggle.com/datasets/dhrubangtalukdar/magnus-carlsen-chess-com-games
 magnus_carlsen_games_dataset_handle: dhrubangtalukdar/magnus-carlsen-chess-com-games
 magnus_carlsen_games_dataset_name: magnus_carlsen_games
+
+chess_positions_dataset_url: https://www.kaggle.com/datasets/nikitricky/chess-positions
+chess_positions_dataset_handle: nikitricky/chess-positions
+chess_positions_dataset_name: chess_positions
 
 # MODELS
 model_path: models/

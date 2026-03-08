@@ -80,8 +80,13 @@ def main(
     # Create the classification model
     logger.info("Loading model...")
 
-    model = models.CheckersNetV1(
-        18, 20480, channels=128, num_blocks=16, temperature=1.2
+    model = models.CheckersNetV2(
+        input_planes=18,
+        policy_planes=20480,
+        channels=192,
+        num_blocks=24,
+        temperature=1.2,
+        use_attention=True,
     )
 
     if CHECKPOINT_PATH:
@@ -114,27 +119,29 @@ def main(
                     f"  - Block index {block_idx} out of range (0-{len(model.res_blocks)-1}), skipping"
                 )
 
-    # Freeze policy head if requested
-    if FREEZE_POLICY_HEAD:
-        logger.info("Freezing policy head...")
-        for param in model.policy_conv.parameters():
-            param.requires_grad = False
-        for param in model.policy_bn.parameters():
-            param.requires_grad = False
-        for param in model.policy_fc.parameters():
-            param.requires_grad = False
+    # Freeze policy head if requested or if its loss is disabled (avoids DDP unused-param overhead)
+    if FREEZE_POLICY_HEAD or not TRAIN_POLICY:
+        if not FREEZE_POLICY_HEAD:
+            logger.info(
+                "Policy loss disabled — freezing policy head to avoid DDP overhead."
+            )
+        else:
+            logger.info("Freezing policy head...")
+        for module in model.policy_head_modules():
+            for param in module.parameters():
+                param.requires_grad = False
 
-    # Freeze value head if requested
-    if FREEZE_VALUE_HEAD:
-        logger.info("Freezing value head...")
-        for param in model.value_conv.parameters():
-            param.requires_grad = False
-        for param in model.value_bn.parameters():
-            param.requires_grad = False
-        for param in model.value_fc1.parameters():
-            param.requires_grad = False
-        for param in model.value_fc2.parameters():
-            param.requires_grad = False
+    # Freeze value head if requested or if its loss is disabled
+    if FREEZE_VALUE_HEAD or not TRAIN_VALUE:
+        if not FREEZE_VALUE_HEAD:
+            logger.info(
+                "Value loss disabled — freezing value head to avoid DDP overhead."
+            )
+        else:
+            logger.info("Freezing value head...")
+        for module in model.value_head_modules():
+            for param in module.parameters():
+                param.requires_grad = False
 
     # Create train and test dataloaders
     logger.info("Creating dataloaders...")
@@ -144,6 +151,7 @@ def main(
     (train_dataloader, test_dataloader), _ = build_features.create_dataloaders(
         data_dir_paths=data_paths,
         batch_size=BATCH_SIZE,
+        num_workers=2,
     )
 
     logger.info("Successfully created dataloaders.")
@@ -152,13 +160,15 @@ def main(
     loss_fn = utils.chess_loss
 
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
     )
 
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        step_size=LR_STEP_INTERVAL,
-        gamma=0.1,
+        T_max=NUM_EPOCHS,
+        eta_min=1e-6,
     )
 
     # Train model with the training loop
@@ -317,18 +327,19 @@ if __name__ == "__main__":
             "Cannot use both --freeze-body and --frozen-blocks. Choose one."
         )
 
+    # Default: train a head if neither its loss nor its freeze flag was explicitly set
     if not TRAIN_POLICY and not TRAIN_VALUE:
-        TRAIN_POLICY = True
-        TRAIN_VALUE = True
+        TRAIN_POLICY = not FREEZE_POLICY_HEAD
+        TRAIN_VALUE = not FREEZE_VALUE_HEAD
 
     # Validate that frozen heads cannot be trained
     if FREEZE_POLICY_HEAD and TRAIN_POLICY:
         raise ValueError(
-            "Cannot train policy head when it is frozen. Either remove --freeze-policy-head or set --train-policy to False."
+            "Cannot train policy head when it is frozen. Either remove --freeze-policy-head or remove --train-policy."
         )
     if FREEZE_VALUE_HEAD and TRAIN_VALUE:
         raise ValueError(
-            "Cannot train value head when it is frozen. Either remove --freeze-value-head or set --train-value to False."
+            "Cannot train value head when it is frozen. Either remove --freeze-value-head or remove --train-value."
         )
 
     config = tools.load_config()
@@ -389,6 +400,8 @@ if __name__ == "__main__":
             data_name=config["stockfish_dataset_name"],
         )
 
+    file_extentions = [".parquet", ".csv"]
+
     # Finding all paths to image data in downloaded datasets
     if SPECIFIED_DATASETS:
         logger.info(
@@ -405,20 +418,20 @@ if __name__ == "__main__":
 
             data_paths.extend(
                 tools.get_files_from_folder(
-                    root_folder_path=dataset_folder_path, extension=".csv"
+                    root_folder_path=dataset_folder_path, extensions=file_extentions
                 )
             )
 
         if not data_paths:
             raise ValueError(
-                "No valid datasets found based on the specified dataset names. Please check the provided names and ensure the corresponding folders and .csv files exist."
+                "No valid datasets found based on the specified dataset names. Please check the provided names and ensure the corresponding folders and .parquet files exist."
             )
     else:
         logger.info(
             f"No specified datasets provided. Using all datasets in data directory: {data_path} for training."
         )
         data_paths: list[Path] = tools.get_files_from_folder(
-            root_folder_path=data_path, extension=".csv"
+            root_folder_path=data_path, extensions=file_extentions
         )
 
     print(data_paths)
