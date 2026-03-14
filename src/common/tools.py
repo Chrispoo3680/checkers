@@ -9,7 +9,7 @@ from zipfile import ZipFile
 
 import chess
 import chess.pgn
-import pandas as pd
+import polars as pl
 import torch
 import yaml
 from tqdm import tqdm
@@ -19,6 +19,36 @@ sys.path.append(str(repo_root_dir))
 
 PROMOTION_MAP = {None: 0, "n": 1, "b": 2, "r": 3, "q": 4}
 INDEX_TO_PROMO = {v: k for k, v in PROMOTION_MAP.items()}
+
+POLICY_PLANES = 73
+POLICY_SIZE = 8 * 8 * POLICY_PLANES
+# POLICY_SIZE = 20480
+
+# AlphaZero-style policy planes:
+# 0-55: sliding moves in 8 directions x 1..7 squares
+# 56-63: knight moves (8)
+# 64-72: underpromotions (N/B/R) x (left/forward/right)
+_SLIDING_DIRS = [
+    (0, 1),
+    (1, 0),
+    (0, -1),
+    (-1, 0),
+    (1, 1),
+    (-1, 1),
+    (1, -1),
+    (-1, -1),
+]
+_KNIGHT_DIRS = [
+    (1, 2),
+    (2, 1),
+    (2, -1),
+    (1, -2),
+    (-1, -2),
+    (-2, -1),
+    (-2, 1),
+    (-1, 2),
+]
+_UNDERPROMO_PIECES = ["n", "b", "r"]
 
 
 class TqdmLoggingHandler(logging.Handler):
@@ -86,6 +116,8 @@ def rename_and_unzip_file(
 def get_files_from_folder(root_folder_path: Union[str, Path], extensions: list[str]):
     data_paths: list[Path] = []
     for root, _, files in os.walk(root_folder_path):
+        if ".training" in root:
+            continue  # Skip already processed parquet files
         for file_name in files:
             if file_name.endswith(tuple(extensions)):
                 data_paths.append(Path(root) / file_name)
@@ -97,7 +129,7 @@ def encode_fen_pos(fen: str) -> torch.Tensor:
     Encode FEN into tensor (18, 8, 8)
     """
 
-    board_fen, side, castling, ep_square, _, _ = fen.split(" ")
+    board_fen, side, castling, ep_square = fen.split(" ")[:4]
 
     pieces = "RNBQKPrnbqkp"
 
@@ -165,38 +197,109 @@ def index_to_square(index):
     return chr(file + ord("a")) + str(rank + 1)
 
 
+def _uci_square_to_file_rank(square: str) -> tuple[int, int]:
+    file_idx = ord(square[0]) - ord("a")
+    rank_idx = int(square[1]) - 1
+    return file_idx, rank_idx
+
+
+def _file_rank_to_uci_square(file_idx: int, rank_idx: int) -> str:
+    return chr(file_idx + ord("a")) + str(rank_idx + 1)
+
+
 def encode_UCI_to_int(move_uci):
 
     if not isinstance(move_uci, str):
         raise ValueError(f"Invalid move type: {move_uci} ({type(move_uci)})")
 
     from_sq = square_to_index(move_uci[:2])
-    to_sq = square_to_index(move_uci[2:4])
+    from_file, from_rank = _uci_square_to_file_rank(move_uci[:2])
+    to_file, to_rank = _uci_square_to_file_rank(move_uci[2:4])
 
-    promotion = move_uci[4] if len(move_uci) == 5 else None
-    promo_id = PROMOTION_MAP[promotion]
+    df = to_file - from_file
+    dr = to_rank - from_rank
 
-    index = from_sq * 64 * 5 + to_sq * 5 + promo_id
-    return index
+    # Underpromotions use dedicated planes.
+    if len(move_uci) == 5 and move_uci[4] in _UNDERPROMO_PIECES:
+        promo_piece = move_uci[4]
+        forward_sign = 1 if dr > 0 else -1
+        rel_df = df * forward_sign  # map to mover-relative left/forward/right
+        if rel_df not in (-1, 0, 1):
+            raise ValueError(f"Invalid underpromotion move: {move_uci}")
+        piece_idx = _UNDERPROMO_PIECES.index(promo_piece)
+        plane = 64 + piece_idx * 3 + (rel_df + 1)
+        return from_sq * POLICY_PLANES + plane
+
+    # Knight planes.
+    if (df, dr) in _KNIGHT_DIRS:
+        plane = 56 + _KNIGHT_DIRS.index((df, dr))
+        return from_sq * POLICY_PLANES + plane
+
+    # Sliding planes (includes queen promotions as normal forward moves).
+    for dir_idx, (dir_df, dir_dr) in enumerate(_SLIDING_DIRS):
+        if dir_df == 0:
+            if df != 0:
+                continue
+            if dr == 0 or (dr > 0) != (dir_dr > 0):
+                continue
+            steps = abs(dr)
+        elif dir_dr == 0:
+            if dr != 0:
+                continue
+            if df == 0 or (df > 0) != (dir_df > 0):
+                continue
+            steps = abs(df)
+        else:
+            if abs(df) != abs(dr) or df == 0:
+                continue
+            if (df > 0) != (dir_df > 0) or (dr > 0) != (dir_dr > 0):
+                continue
+            steps = abs(df)
+
+        if 1 <= steps <= 7:
+            plane = dir_idx * 7 + (steps - 1)
+            return from_sq * POLICY_PLANES + plane
+
+    raise ValueError(f"Move cannot be represented in 8x8x73 policy space: {move_uci}")
 
 
 def decode_int_to_UCI(index):
-
-    from_sq = index // (64 * 5)
-    remainder = index % (64 * 5)
-
-    to_sq = remainder // 5
-    promo_id = remainder % 5
+    from_sq = index // POLICY_PLANES
+    plane = index % POLICY_PLANES
 
     from_square = index_to_square(from_sq)
-    to_square = index_to_square(to_sq)
+    from_file, from_rank = _uci_square_to_file_rank(from_square)
 
-    promotion = INDEX_TO_PROMO[promo_id]
+    promotion = None
+    if plane < 56:
+        dir_idx = plane // 7
+        steps = (plane % 7) + 1
+        dir_df, dir_dr = _SLIDING_DIRS[dir_idx]
+        to_file = from_file + dir_df * steps
+        to_rank = from_rank + dir_dr * steps
+    elif plane < 64:
+        knight_idx = plane - 56
+        dir_df, dir_dr = _KNIGHT_DIRS[knight_idx]
+        to_file = from_file + dir_df
+        to_rank = from_rank + dir_dr
+    else:
+        rel = (plane - 64) % 3 - 1  # -1,0,1
+        piece_idx = (plane - 64) // 3
+        promotion = _UNDERPROMO_PIECES[piece_idx]
 
+        forward_sign = 1 if from_rank >= 6 else -1
+        df = rel * forward_sign
+        dr = forward_sign
+        to_file = from_file + df
+        to_rank = from_rank + dr
+
+    if not (0 <= to_file < 8 and 0 <= to_rank < 8):
+        raise ValueError(f"Decoded move goes out of board: index={index}")
+
+    to_square = _file_rank_to_uci_square(to_file, to_rank)
     if promotion is None:
         return from_square + to_square
-    else:
-        return from_square + to_square + promotion
+    return from_square + to_square + promotion
 
 
 def expand_game_positions(puzzles_df, fen_col="FEN", moves_col="Moves"):
@@ -219,7 +322,7 @@ def expand_game_positions(puzzles_df, fen_col="FEN", moves_col="Moves"):
     """
     expanded_data = []
 
-    for _, row in tqdm(puzzles_df.iterrows()):
+    for row in tqdm(puzzles_df.iter_rows(named=True), total=len(puzzles_df)):
         board = chess.Board(row[fen_col])
 
         # Split moves if it's a string, otherwise assume it's already a list
@@ -240,7 +343,7 @@ def expand_game_positions(puzzles_df, fen_col="FEN", moves_col="Moves"):
                 # Skip invalid moves
                 continue
 
-    return pd.DataFrame(expanded_data)
+    return expanded_data
 
 
 def _StrictGameBuilder():
@@ -301,7 +404,7 @@ def expand_game_positions_san(games_df, moves_col="Moves", eval_col="Evaluation"
             )  # +1 for white win, -1 for black win, 0 for draw
             board.push(move)
 
-    return pd.DataFrame({"fen": fens, "moves": moves_out, "evaluation": evaluations})
+    return {"fen": fens, "moves": moves_out, "evaluation": evaluations}
 
 
 def convert_san_to_uci(fen: str, san_move: str) -> str:
@@ -323,6 +426,44 @@ def convert_san_to_uci(fen: str, san_move: str) -> str:
     board = chess.Board(fen)
     move = board.parse_san(san_move)
     return move.uci()
+
+
+def cp_weighted_moves(cp_values: list[int], temperature=75):
+    best_cp = cp_values[0]
+    delta_cps = [best_cp - cp for cp in cp_values]
+    weights = [pow(2.71828, -delta_cp / temperature) for delta_cp in delta_cps]
+    total_weight = sum(weights)
+    normalized_weights = [weight / total_weight for weight in weights]
+    return normalized_weights
+
+
+def mate_to_cp(mate_expr, cp_expr):
+    """Use mate score as large cp sentinel, fall back to cp if no mate."""
+    return (
+        pl.when(mate_expr.is_not_null())
+        .then(
+            pl.when(mate_expr > 0)
+            .then(30000 - mate_expr * 10)  # mate=1 → 29990, mate=3 → 29970
+            .otherwise(-30000 - mate_expr * 10)  # mate=-1 → -29990, mate=-3 → -29970
+        )
+        .otherwise(cp_expr)
+    )
+
+
+def effective_cp_element():
+    """For use inside list.agg (pl.element() context)."""
+    return mate_to_cp(
+        pl.element().struct.field("mate"),
+        pl.element().struct.field("cp"),
+    )
+
+
+def effective_cp_single(pvs_expr):
+    """For use on a single struct (e.g. after list.get(0))."""
+    return mate_to_cp(
+        pvs_expr.struct.field("mate"),
+        pvs_expr.struct.field("cp"),
+    )
 
 
 @contextmanager

@@ -4,7 +4,7 @@ Contains various utility functions for PyTorch model training and saving.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -22,6 +22,12 @@ except KeyError:
 logger = tools.create_logger(log_path=logging_file_path, logger_name=__name__)
 
 
+def _flatten_policy_tensor(policy_tensor: torch.Tensor) -> torch.Tensor:
+    if policy_tensor.dim() > 2:
+        return policy_tensor.view(policy_tensor.size(0), -1)
+    return policy_tensor
+
+
 def chess_loss(
     p_logits,
     v_pred,
@@ -37,6 +43,8 @@ def chess_loss(
     total_loss = torch.zeros(1, device=p_logits.device, dtype=p_logits.dtype)
 
     if pi_target is not None:
+        p_logits = _flatten_policy_tensor(p_logits)
+        pi_target = _flatten_policy_tensor(pi_target)
         log_probs = F.log_softmax(p_logits, dim=1)
         policy_loss = -(pi_target * log_probs).sum(dim=1).mean()
         entropy = -(log_probs.exp() * log_probs).sum(dim=1).mean()
@@ -83,7 +91,10 @@ def validation_score(correlation, sign_accuracy):
 def policy_top1_accuracy(policy_logits, pi_target, legal_mask=None):
     """Returns (correct_count, total_count) for top-1 policy accuracy.
     Optionally masks illegal moves before taking the argmax of logits."""
+    policy_logits = _flatten_policy_tensor(policy_logits)
+    pi_target = _flatten_policy_tensor(pi_target)
     if legal_mask is not None:
+        legal_mask = _flatten_policy_tensor(legal_mask)
         policy_logits = policy_logits.masked_fill(legal_mask == 0, float("-inf"))
     pred_top1 = torch.argmax(policy_logits, dim=1)
     target_top1 = torch.argmax(pi_target, dim=1)
@@ -97,7 +108,10 @@ def policy_top3_accuracy(policy_logits, pi_target, legal_mask=None):
     A prediction is correct if the model's top-1 move is among the top-3
     moves in pi_target with non-zero probability. Handles positions with
     fewer than 3 legal moves correctly."""
+    policy_logits = _flatten_policy_tensor(policy_logits)
+    pi_target = _flatten_policy_tensor(pi_target)
     if legal_mask is not None:
+        legal_mask = _flatten_policy_tensor(legal_mask)
         policy_logits = policy_logits.masked_fill(legal_mask == 0, float("-inf"))
     pred_top1 = torch.argmax(policy_logits, dim=1).unsqueeze(1)  # (B, 1)
 
@@ -115,7 +129,8 @@ def policy_top3_accuracy(policy_logits, pi_target, legal_mask=None):
 def create_policy_distribution_with_smoothing(
     top_move_indices: list[int],
     legal_move_indices: list[int],
-    policy_size: int = 20480,
+    move_weights: Optional[list[float]] = None,
+    policy_size: int = tools.POLICY_SIZE,
     epsilon: float = 0.02,
 ):
     """
@@ -124,16 +139,20 @@ def create_policy_distribution_with_smoothing(
     Args:
         top_move_indices: indices of top moves from Stockfish
         legal_move_indices: indices of all legal moves
+        move_weights: weights for the top moves
         epsilon: probability mass for non-top moves
 
     Returns:
         A tensor of shape (policy_size,) representing the policy distribution.
     """
 
+    if move_weights is None:
+        move_weights = [0.5, 0.2, 0.15, 0.1, 0.05]
+
     policy = torch.zeros(policy_size, dtype=torch.float32)
 
     k = len(top_move_indices)
-    base_weights = torch.tensor([0.5, 0.2, 0.15, 0.1, 0.05][:k])
+    base_weights = torch.tensor(move_weights[:k])
     base_weights = base_weights / base_weights.sum()
 
     top_indices = torch.tensor(top_move_indices, dtype=torch.long)
@@ -161,15 +180,25 @@ def ddp_setup(rank, world_size):
 
     torch.cuda.set_device(rank)
 
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    try:
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device("cuda", rank),
+        )
+    except TypeError:
+        # Backward compatibility with older torch versions without device_id.
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 def ddp_cleanup():
-    dist.destroy_process_group()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def save_model(
-    model: Union[torch.nn.Module, Dict[str, Any]],
+    model: Union[torch.nn.Module, dict[str, Any]],
     target_dir_path: Path,
     model_name: str,
 ):
@@ -194,7 +223,7 @@ def save_model(
 
 def model_save_version(save_dir_path: Path, save_name: str) -> str:
 
-    files_in_dir: List[str] = os.listdir(save_dir_path)
+    files_in_dir: list[str] = os.listdir(save_dir_path)
     version = str(sum([1 for file in files_in_dir if save_name in file]))
 
     save_name_version: str = f"{save_name}{version}"
@@ -242,7 +271,7 @@ class EarlyStopping:
         self.best_score_epoch: int = 0
         self.early_stop: bool = False
         self.counter: int = 0
-        self.best_model_state: Dict[str, Any] = {}
+        self.best_model_state: dict[str, Any] = {}
         self.last_3_scores: list[float] = []
 
     def __call__(self, val_loss, model, epoch) -> None:

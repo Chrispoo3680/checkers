@@ -28,6 +28,7 @@ def main(
     world_size: int,
     NUM_EPOCHS,
     BATCH_SIZE,
+    NUM_WORKERS,
     LEARNING_RATE,
     WEIGHT_DECAY,
     LR_STEP_INTERVAL,
@@ -39,6 +40,9 @@ def main(
     FREEZE_VALUE_HEAD,
     TRAIN_POLICY,
     TRAIN_VALUE,
+    EARLY_STOPPING_METRIC,
+    EARLY_STOPPING_PATIENCE,
+    EARLY_STOPPING_DELTA,
     data_paths,
     temp_checkpoint_dir,
     model_save_path,
@@ -48,174 +52,218 @@ def main(
     device_type,  # Changed: pass device type string instead of device object
 ):
 
-    utils.ddp_setup(rank, world_size)
+    use_ddp = world_size > 1
 
-    # Create device per worker
-    device = torch.device(f"cuda:{rank}" if device_type == "cuda" else "cpu")
+    if use_ddp:
+        utils.ddp_setup(rank, world_size)
 
-    # Create writer per worker (only for rank 0)
-    if rank == 0 and writer_config is not None:
-        writer = utils.create_writer(
-            root_dir=writer_config["root_dir"],
-            experiment_name=writer_config["experiment_name"],
-            model_name=writer_config["model_name"],
-            var=writer_config["var"],
-        )
-    else:
-        writer = None
+    try:
+        if rank == 0:
+            try:
+                logging_file_path = os.environ["LOGGING_FILE_PATH"]
+            except KeyError:
+                logging_file_path = None
 
-    if rank == 0:
-        try:
-            logging_file_path = os.environ["LOGGING_FILE_PATH"]
-        except KeyError:
-            logging_file_path = None
+            logger = tools.create_logger(
+                log_path=logging_file_path, logger_name=__name__
+            )
 
-        logger = tools.create_logger(log_path=logging_file_path, logger_name=__name__)
+        else:
+            logger = logging.getLogger("silent_logger")
+            logger.setLevel(logging.INFO)
+            logger.addHandler(logging.NullHandler())
 
-    else:
-        logger = logging.getLogger("silent_logger")
-        logger.setLevel(logging.INFO)
-        logger.addHandler(logging.NullHandler())
+        # Create device per worker
+        device = torch.device(f"cuda:{rank}" if device_type == "cuda" else "cpu")
 
-    # Create the classification model
-    logger.info("Loading model...")
+        if device_type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+                torch.backends.cuda.matmul.allow_tf32 = True
+            if hasattr(torch.backends.cudnn, "allow_tf32"):
+                torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
 
-    model = models.CheckersNetV2(
-        input_planes=18,
-        policy_planes=20480,
-        channels=192,
-        num_blocks=24,
-        temperature=1.2,
-        use_attention=True,
-    )
-
-    if CHECKPOINT_PATH:
-        logger.info(f"Loading model weights from checkpoint: {CHECKPOINT_PATH}...")
-        model.load_state_dict(torch.load(CHECKPOINT_PATH))
-
-    # Freeze entire body if requested (initial conv + all residual blocks)
-    if FREEZE_BODY:
-        logger.info(
-            "Freezing entire model body (initial conv + all residual blocks)..."
-        )
-        for param in model.conv_input.parameters():
-            param.requires_grad = False
-        for param in model.bn_input.parameters():
-            param.requires_grad = False
-        for block in model.res_blocks:
-            for param in block.parameters():
-                param.requires_grad = False
-
-    # Freeze specific residual blocks if requested
-    elif FROZEN_BLOCKS:
-        logger.info(f"Freezing specific residual blocks: {FROZEN_BLOCKS}")
-        for block_idx in FROZEN_BLOCKS:
-            if 0 <= block_idx < len(model.res_blocks):
-                for param in model.res_blocks[block_idx].parameters():
-                    param.requires_grad = False
-                logger.info(f"  - Frozen block {block_idx}")
+        amp_enabled = device_type == "cuda"
+        amp_dtype = torch.float16
+        if device_type == "cuda":
+            major, minor = torch.cuda.get_device_capability(rank)
+            # GTX 10xx (sm_6.x) has no Tensor Cores; AMP can be slower there.
+            if major < 7:
+                amp_enabled = False
+                logger.info(
+                    "Disabling AMP on CUDA capability %s.%s (no Tensor Cores).",
+                    major,
+                    minor,
+                )
             else:
-                logger.warning(
-                    f"  - Block index {block_idx} out of range (0-{len(model.res_blocks)-1}), skipping"
+                logger.info(
+                    "Enabling AMP (float16) on CUDA capability %s.%s.", major, minor
                 )
 
-    # Freeze policy head if requested or if its loss is disabled (avoids DDP unused-param overhead)
-    if FREEZE_POLICY_HEAD or not TRAIN_POLICY:
-        if not FREEZE_POLICY_HEAD:
-            logger.info(
-                "Policy loss disabled — freezing policy head to avoid DDP overhead."
+        # Create writer per worker (only for rank 0)
+        if rank == 0 and writer_config is not None:
+            writer = utils.create_writer(
+                root_dir=writer_config["root_dir"],
+                experiment_name=writer_config["experiment_name"],
+                model_name=writer_config["model_name"],
+                var=writer_config["var"],
             )
         else:
-            logger.info("Freezing policy head...")
-        for module in model.policy_head_modules():
-            for param in module.parameters():
-                param.requires_grad = False
+            writer = None
 
-    # Freeze value head if requested or if its loss is disabled
-    if FREEZE_VALUE_HEAD or not TRAIN_VALUE:
-        if not FREEZE_VALUE_HEAD:
-            logger.info(
-                "Value loss disabled — freezing value head to avoid DDP overhead."
-            )
-        else:
-            logger.info("Freezing value head...")
-        for module in model.value_head_modules():
-            for param in module.parameters():
-                param.requires_grad = False
+        # Create the classification model
+        logger.info("Loading model...")
 
-    # Create train and test dataloaders
-    logger.info("Creating dataloaders...")
-
-    # Create train/test dataloader
-    # Use num_workers=0 to avoid spawning additional processes (critical for memory)
-    (train_dataloader, test_dataloader), _ = build_features.create_dataloaders(
-        data_dir_paths=data_paths,
-        batch_size=BATCH_SIZE,
-        num_workers=2,
-    )
-
-    logger.info("Successfully created dataloaders.")
-
-    # Set loss, optimizer and learning rate scheduling
-    loss_fn = utils.chess_loss
-
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
-    )
-
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=NUM_EPOCHS,
-        eta_min=1e-6,
-    )
-
-    # Train model with the training loop
-    logger.info("Starting training...\n")
-
-    early_stopping = utils.EarlyStopping(patience=5, delta=0.001)
-
-    # Set up scaler for better efficiency
-    scaler = GradScaler()
-
-    trainer = Trainer(
-        model=model,
-        optimizer=optimizer,
-        loss_fn=loss_fn,
-        train_policy=TRAIN_POLICY,
-        train_value=TRAIN_VALUE,
-        train_dataloader=train_dataloader,
-        test_dataloader=test_dataloader,
-        device=device,
-        rank=rank,
-        scaler=scaler,
-        early_stopping=early_stopping,
-        lr_scheduler=lr_scheduler,
-        temp_checkpoint_file_path=temp_checkpoint_dir
-        / (model_save_name_version + ".pt"),
-        writer=writer,
-    )
-
-    results, best_state = trainer.train(NUM_EPOCHS)
-
-    if rank == 0:
-        # Save the trained model
-        utils.save_model(
-            model=best_state,
-            target_dir_path=model_save_path,
-            model_name=model_save_name_version + ".pt",
+        model = models.CheckersNetV3(
+            input_planes=18,  # 12 piece planes + side-to-move + 4 castling + en-passant
+            policy_planes=73,
+            channels=256,
+            num_blocks=15,
+            se_every_n_blocks=4,
+            temperature=1.0,
         )
 
-        # Save training results
-        results_json = json.dumps(results, indent=4)
+        if CHECKPOINT_PATH:
+            logger.info(f"Loading model weights from checkpoint: {CHECKPOINT_PATH}...")
+            model.load_state_dict(torch.load(CHECKPOINT_PATH))
 
-        with open(
-            results_save_path / (model_save_name_version + "_results.json"), "w"
-        ) as f:
-            f.write(results_json)
+        # Freeze entire body if requested (initial conv + all residual blocks)
+        if FREEZE_BODY:
+            logger.info(
+                "Freezing entire model body (initial conv + all residual blocks)..."
+            )
+            for param in model.conv_input.parameters():
+                param.requires_grad = False
+            for param in model.bn_input.parameters():
+                param.requires_grad = False
+            for block in model.res_blocks:
+                for param in block.parameters():
+                    param.requires_grad = False
 
-    utils.ddp_cleanup()
+        # Freeze specific residual blocks if requested
+        elif FROZEN_BLOCKS:
+            logger.info(f"Freezing specific residual blocks: {FROZEN_BLOCKS}")
+            for block_idx in FROZEN_BLOCKS:
+                if 0 <= block_idx < len(model.res_blocks):
+                    for param in model.res_blocks[block_idx].parameters():
+                        param.requires_grad = False
+                    logger.info(f"  - Frozen block {block_idx}")
+                else:
+                    logger.warning(
+                        f"  - Block index {block_idx} out of range (0-{len(model.res_blocks)-1}), skipping"
+                    )
+
+        # Freeze policy head if requested or if its loss is disabled (avoids DDP unused-param overhead)
+        if FREEZE_POLICY_HEAD or not TRAIN_POLICY:
+            if not FREEZE_POLICY_HEAD:
+                logger.info(
+                    "Policy loss disabled — freezing policy head to avoid DDP overhead."
+                )
+            else:
+                logger.info("Freezing policy head...")
+            for module in model.policy_head_modules():
+                for param in module.parameters():
+                    param.requires_grad = False
+
+        # Freeze value head if requested or if its loss is disabled
+        if FREEZE_VALUE_HEAD or not TRAIN_VALUE:
+            if not FREEZE_VALUE_HEAD:
+                logger.info(
+                    "Value loss disabled — freezing value head to avoid DDP overhead."
+                )
+            else:
+                logger.info("Freezing value head...")
+            for module in model.value_head_modules():
+                for param in module.parameters():
+                    param.requires_grad = False
+
+        # Create train and test dataloaders
+        logger.info("Creating dataloaders...")
+
+        cache_decode_dtype = torch.float16 if amp_enabled else torch.float32
+        logger.info("Cache decode dtype set to %s", cache_decode_dtype)
+
+        # Create train/test dataloader
+        # Use num_workers=0 to avoid spawning additional processes (critical for memory)
+        (train_dataloader, test_dataloader), _ = build_features.create_dataloaders(
+            data_dir_paths=data_paths,
+            batch_size=BATCH_SIZE,
+            num_workers=NUM_WORKERS,
+            cache_decode_dtype=cache_decode_dtype,
+        )
+
+        logger.info("Successfully created dataloaders.")
+
+        # Set loss, optimizer and learning rate scheduling
+        loss_fn = utils.chess_loss
+
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=LEARNING_RATE,
+            weight_decay=WEIGHT_DECAY,
+        )
+
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=NUM_EPOCHS,
+            eta_min=1e-6,
+        )
+
+        # Train model with the training loop
+        logger.info("Starting training...\n")
+
+        early_stopping = utils.EarlyStopping(
+            patience=EARLY_STOPPING_PATIENCE,
+            delta=EARLY_STOPPING_DELTA,
+        )
+
+        # Set up scaler for mixed precision efficiency
+        scaler = GradScaler(enabled=amp_enabled)
+
+        trainer = Trainer(
+            model=model,
+            optimizer=optimizer,
+            loss_fn=loss_fn,
+            train_policy=TRAIN_POLICY,
+            train_value=TRAIN_VALUE,
+            early_stopping_metric=EARLY_STOPPING_METRIC,
+            train_dataloader=train_dataloader,
+            test_dataloader=test_dataloader,
+            device=device,
+            rank=rank,
+            scaler=scaler,
+            early_stopping=early_stopping,
+            lr_scheduler=lr_scheduler,
+            temp_checkpoint_file_path=temp_checkpoint_dir
+            / (model_save_name_version + ".pt"),
+            writer=writer,
+            use_ddp=use_ddp,
+            amp_enabled=amp_enabled,
+            amp_dtype=amp_dtype,
+        )
+
+        results, best_state = trainer.train(NUM_EPOCHS)
+
+        if rank == 0 and best_state:
+            # Save the trained model
+            utils.save_model(
+                model=best_state,
+                target_dir_path=model_save_path,
+                model_name=model_save_name_version + ".pt",
+            )
+
+            # Save training results
+            results_json = json.dumps(results, indent=4)
+
+            with open(
+                results_save_path / (model_save_name_version + "_results.json"), "w"
+            ) as f:
+                f.write(results_json)
+    finally:
+        if use_ddp:
+            utils.ddp_cleanup()
 
 
 if __name__ == "__main__":
@@ -224,7 +272,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hyperparameter configuration")
 
     parser.add_argument("--num-epochs", type=int, default=50, help="Number of epochs")
-    parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
+    parser.add_argument("--batch-size", type=int, default=512, help="Batch size")
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="Number of DataLoader worker processes per training process",
+    )
     parser.add_argument(
         "--learning-rate", type=float, default=0.001, help="Learning rate"
     )
@@ -284,6 +338,25 @@ if __name__ == "__main__":
         help="Whether to compute and use value loss during training (default: True). Cannot be True if --freeze-value-head is set.",
     )
     parser.add_argument(
+        "--early-stopping-metric",
+        type=str,
+        default="combined",
+        choices=["combined", "policy", "value"],
+        help="Metric used for early stopping: 'combined' (0.5*value_score + 0.5*policy_top1), 'policy' (policy_top1_acc), or 'value' (value_score)",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=5,
+        help="Number of epochs without improvement before stopping early",
+    )
+    parser.add_argument(
+        "--early-stopping-delta",
+        type=float,
+        default=0.001,
+        help="Minimum improvement in the early stopping metric to count as progress",
+    )
+    parser.add_argument(
         "--experiment-name", type=str, default=None, help="Experiment name"
     )
     parser.add_argument(
@@ -302,6 +375,7 @@ if __name__ == "__main__":
     # Setup hyperparameters
     NUM_EPOCHS = args.num_epochs
     BATCH_SIZE = args.batch_size
+    NUM_WORKERS = args.num_workers
     LEARNING_RATE = args.learning_rate
     WEIGHT_DECAY = args.weight_decay
     LR_STEP_INTERVAL = args.lr_step_interval
@@ -318,6 +392,9 @@ if __name__ == "__main__":
     FREEZE_VALUE_HEAD = args.freeze_value_head
     TRAIN_POLICY = args.train_policy
     TRAIN_VALUE = args.train_value
+    EARLY_STOPPING_METRIC = args.early_stopping_metric
+    EARLY_STOPPING_PATIENCE = args.early_stopping_patience
+    EARLY_STOPPING_DELTA = args.early_stopping_delta
     EXPERIMENT_NAME = args.experiment_name
     EXPERIMENT_VARIABLE = args.experiment_variable
 
@@ -395,12 +472,28 @@ if __name__ == "__main__":
         )
     else:
         download.kaggle_download_data(
-            data_handle=config["stockfish_dataset_name"],
+            data_handle=config["lichess_puzzles_dataset_handle"],
             save_path=data_path,
-            data_name=config["stockfish_dataset_name"],
+            data_name=config["lichess_puzzles_dataset_name"],
+        )
+        download.kaggle_download_data(
+            data_handle=config["magnus_carlsen_games_dataset_handle"],
+            save_path=data_path,
+            data_name=config["magnus_carlsen_games_dataset_name"],
+        )
+        download.kaggle_download_data(
+            data_handle=config["stockfish_position_evaluations_dataset_handle"],
+            save_path=data_path,
+            data_name=config["stockfish_position_evaluations_dataset_name"],
         )
 
-    file_extentions = [".parquet", ".csv"]
+        # download.api_scraper_download_data(
+        #     download_url=config["lichess_db_eval_dataset_download_url"],
+        #     save_path=data_path,
+        #     data_name=config["lichess_db_eval_dataset_name"],
+        # )
+
+    file_extentions = [".parquet", ".csv", ".jsonl"]
 
     # Finding all paths to image data in downloaded datasets
     if SPECIFIED_DATASETS:
@@ -458,6 +551,7 @@ if __name__ == "__main__":
         f"Using hyperparameters:"
         f"\n    num_epochs = {NUM_EPOCHS}"
         f"\n    batch_size = {BATCH_SIZE}"
+        f"\n    num_workers = {NUM_WORKERS}"
         f"\n    learning_rate = {LEARNING_RATE}"
         f"\n    weight_decay = {WEIGHT_DECAY}"
         f"\n    lr_step_interval = {LR_STEP_INTERVAL}"
@@ -471,35 +565,75 @@ if __name__ == "__main__":
         f"\n    freeze_value_head = {FREEZE_VALUE_HEAD}"
         f"\n    train_policy = {TRAIN_POLICY}"
         f"\n    train_value = {TRAIN_VALUE}"
+        f"\n    early_stopping_metric = {EARLY_STOPPING_METRIC}"
+        f"\n    early_stopping_patience = {EARLY_STOPPING_PATIENCE}"
+        f"\n    early_stopping_delta = {EARLY_STOPPING_DELTA}"
         f"\n    experiment_name = {EXPERIMENT_NAME}"
         f"\n    experiment_name = {EXPERIMENT_VARIABLE}"
         f"\n    world_size = {world_size}"
     )
 
-    mp.spawn(  # type: ignore
-        main,
-        args=(
-            world_size,
-            NUM_EPOCHS,
-            BATCH_SIZE,
-            LEARNING_RATE,
-            WEIGHT_DECAY,
-            LR_STEP_INTERVAL,
-            FROZEN_BLOCKS,
-            CHECKPOINT_PATH,
-            MODEL_NAME,
-            FREEZE_BODY,
-            FREEZE_POLICY_HEAD,
-            FREEZE_VALUE_HEAD,
-            TRAIN_POLICY,
-            TRAIN_VALUE,
-            data_paths,
-            temp_checkpoint_dir,
-            model_save_path,
-            model_save_name_version,
-            results_save_path,
-            writer_config,  # Pass config dict instead of writer object
-            device_type,  # Pass device type string instead of device object
-        ),
-        nprocs=world_size,
-    )
+    try:
+        if world_size == 1:
+            main(
+                rank=0,
+                world_size=1,
+                NUM_EPOCHS=NUM_EPOCHS,
+                BATCH_SIZE=BATCH_SIZE,
+                NUM_WORKERS=NUM_WORKERS,
+                LEARNING_RATE=LEARNING_RATE,
+                WEIGHT_DECAY=WEIGHT_DECAY,
+                LR_STEP_INTERVAL=LR_STEP_INTERVAL,
+                FROZEN_BLOCKS=FROZEN_BLOCKS,
+                CHECKPOINT_PATH=CHECKPOINT_PATH,
+                MODEL_NAME=MODEL_NAME,
+                FREEZE_BODY=FREEZE_BODY,
+                FREEZE_POLICY_HEAD=FREEZE_POLICY_HEAD,
+                FREEZE_VALUE_HEAD=FREEZE_VALUE_HEAD,
+                TRAIN_POLICY=TRAIN_POLICY,
+                TRAIN_VALUE=TRAIN_VALUE,
+                EARLY_STOPPING_METRIC=EARLY_STOPPING_METRIC,
+                EARLY_STOPPING_PATIENCE=EARLY_STOPPING_PATIENCE,
+                EARLY_STOPPING_DELTA=EARLY_STOPPING_DELTA,
+                data_paths=data_paths,
+                temp_checkpoint_dir=temp_checkpoint_dir,
+                model_save_path=model_save_path,
+                model_save_name_version=model_save_name_version,
+                results_save_path=results_save_path,
+                writer_config=writer_config,
+                device_type=device_type,
+            )
+        else:
+            mp.spawn(  # type: ignore
+                main,
+                args=(
+                    world_size,
+                    NUM_EPOCHS,
+                    BATCH_SIZE,
+                    NUM_WORKERS,
+                    LEARNING_RATE,
+                    WEIGHT_DECAY,
+                    LR_STEP_INTERVAL,
+                    FROZEN_BLOCKS,
+                    CHECKPOINT_PATH,
+                    MODEL_NAME,
+                    FREEZE_BODY,
+                    FREEZE_POLICY_HEAD,
+                    FREEZE_VALUE_HEAD,
+                    TRAIN_POLICY,
+                    TRAIN_VALUE,
+                    EARLY_STOPPING_METRIC,
+                    EARLY_STOPPING_PATIENCE,
+                    EARLY_STOPPING_DELTA,
+                    data_paths,
+                    temp_checkpoint_dir,
+                    model_save_path,
+                    model_save_name_version,
+                    results_save_path,
+                    writer_config,  # Pass config dict instead of writer object
+                    device_type,  # Pass device type string instead of device object
+                ),
+                nprocs=world_size,
+            )
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user (Ctrl+C). Exiting gracefully.")

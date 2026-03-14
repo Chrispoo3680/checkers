@@ -12,9 +12,7 @@ import chess
 import torch
 import torch.nn.functional as F
 
-from src.common.tools import encode_fen_pos, encode_UCI_to_int
-
-POLICY_SIZE = 64 * 64 * 5  # 20480
+from src.common.tools import POLICY_SIZE, encode_fen_pos, encode_UCI_to_int
 
 
 class Node:
@@ -120,7 +118,8 @@ class MCTS:
 
     Args:
         model: A PyTorch model whose ``forward(x)`` returns
-               ``(policy_logits, value)`` with shapes ``(1, 20480)``
+               ``(policy_logits, value)`` where policy logits are in the
+               8x8x73 space (shape ``(1, 8, 8, 73)`` or flatten-equivalent)
                and ``(1, 1)`` respectively.
         num_simulations: How many MCTS simulations to run per search call.
         c_puct: Exploration constant for the PUCT formula.
