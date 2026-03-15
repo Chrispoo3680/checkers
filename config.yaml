@@ -29,6 +29,9 @@ temp_checkpoint_path: temp_checkpoints/
 # RESULTS
 results_path: results/
 
+# TEMPFILE
+tempfile_path: temp/
+
 # LOGGING
 logging_path: logs/
 logging_level: debug

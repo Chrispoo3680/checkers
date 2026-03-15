@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Union
@@ -102,6 +103,37 @@ def load_config():
     with open(repo_root_dir / "config.yaml") as p:
         config = yaml.safe_load(p)
     return config
+
+
+def get_temp_dir(create: bool = True) -> Path:
+    config = load_config()
+    temp_dir = repo_root_dir / config["tempfile_path"]
+
+    if create:
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+    return temp_dir
+
+
+def configure_temp_storage() -> Path:
+    temp_dir = get_temp_dir(create=True).resolve()
+
+    os.environ["TMPDIR"] = str(temp_dir)
+    os.environ["TEMP"] = str(temp_dir)
+    os.environ["TMP"] = str(temp_dir)
+    tempfile.tempdir = str(temp_dir)
+
+    return temp_dir
+
+
+@contextmanager
+def working_directory(path: Union[str, Path]):
+    original_cwd = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(original_cwd)
 
 
 def rename_and_unzip_file(

@@ -54,7 +54,9 @@ def process_lichess_puzzles(path, batch_size=10_000):
     lazy_df = pl.scan_parquet(path).select(["FEN", "Moves"])
     total = lazy_df.select(pl.len()).collect().item()
 
-    tmp_dir = tempfile.mkdtemp(prefix="lichess_puzzles_")
+    tmp_dir = tempfile.mkdtemp(
+        prefix="lichess_puzzles_", dir=str(tools.configure_temp_storage())
+    )
 
     for i, offset in enumerate(range(0, total, batch_size)):
         batch_pl = lazy_df.slice(offset, batch_size).collect()
