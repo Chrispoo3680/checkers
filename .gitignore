@@ -1,6 +1,9 @@
 # Repo spesific
 /data
 /models
+/results
+/logs
+/temp_checkpoints
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

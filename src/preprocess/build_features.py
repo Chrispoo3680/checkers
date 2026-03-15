@@ -114,7 +114,10 @@ def _normalize_evaluation_scalar(evaluation) -> float:
 
         return float(torch.tanh(torch.tensor(float(evaluation) / 600)).item())
 
-    return float(evaluation)
+    value = float(evaluation)
+    if not np.isfinite(value):
+        return 0.0
+    return float(np.tanh(np.clip(value, -1000.0, 1000.0) / 600.0))
 
 
 def _encode_fen_to_bytes_f16(fen: str) -> bytes:
@@ -147,6 +150,9 @@ def _encode_policy_target_to_bytes_f16(policy_row: dict[str, Any]) -> bytes:
 
 def _encode_value_target_to_bytes_f16(normalized_evaluation: float | None) -> bytes:
     value = 0.0 if normalized_evaluation is None else float(normalized_evaluation)
+    if not np.isfinite(value):
+        value = 0.0
+    value = float(np.clip(value, -1.0, 1.0))
     return np.asarray([value], dtype=np.float16).tobytes()
 
 
@@ -252,7 +258,7 @@ def _get_cached_parquet(
                 row_group_size=_PARQUET_ROW_GROUP_SIZE,
             )
 
-            if batch_num % 10 == 0 or batch_num == batches_total:
+            if batch_num % 1 == 0 or batch_num == batches_total:
                 elapsed = max(time.perf_counter() - started_at, 1e-6)
                 done_rows = min(offset + _CACHE_BUILD_BATCH_SIZE, total_rows)
                 rows_per_sec = int(done_rows / elapsed)

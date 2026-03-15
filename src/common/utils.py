@@ -51,6 +51,9 @@ def chess_loss(
         total_loss = total_loss + policy_loss - entropy_weight * entropy
 
     if v_target is not None:
+        v_target = torch.nan_to_num(v_target, nan=0.0, posinf=1.0, neginf=-1.0)
+        v_target = torch.clamp(v_target, -1.0, 1.0)
+        v_pred = torch.nan_to_num(v_pred, nan=0.0, posinf=1.0, neginf=-1.0)
         value_loss = F.mse_loss(v_pred, v_target)
         total_loss = total_loss + value_weight * value_loss
 

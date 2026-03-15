@@ -98,6 +98,11 @@ class ChessDataset(Dataset):
                 .copy()
             )
 
+        normalized_evaluation = torch.nan_to_num(
+            normalized_evaluation, nan=0.0, posinf=1.0, neginf=-1.0
+        )
+        normalized_evaluation = torch.clamp(normalized_evaluation, -1.0, 1.0)
+
         return decoded_position, encoded_best_moves, normalized_evaluation
 
     def __getitem__(self, index):
