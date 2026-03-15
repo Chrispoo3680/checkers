@@ -471,6 +471,12 @@ if __name__ == "__main__":
             f"There already exists files in directory: {data_path}. Assuming datasets are already downloaded!"
         )
     else:
+        download.api_scraper_download_data(
+            download_url=config["lichess_db_eval_dataset_download_url"],
+            save_path=data_path,
+            data_name=config["lichess_db_eval_dataset_name"],
+        )
+
         download.kaggle_download_data(
             data_handle=config["lichess_puzzles_dataset_handle"],
             save_path=data_path,
@@ -486,12 +492,6 @@ if __name__ == "__main__":
             save_path=data_path,
             data_name=config["stockfish_position_evaluations_dataset_name"],
         )
-
-        # download.api_scraper_download_data(
-        #     download_url=config["lichess_db_eval_dataset_download_url"],
-        #     save_path=data_path,
-        #     data_name=config["lichess_db_eval_dataset_name"],
-        # )
 
     file_extentions = [".parquet", ".csv", ".jsonl"]
 

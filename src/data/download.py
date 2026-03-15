@@ -1,19 +1,23 @@
 # This file is meant to be used for downloading datasets from "kaggle.com" with the kaggle API.
 # If any other datasets with potentially other API's is wanted to be used, there is no guarantee the code will work without being changed.
 
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from shutil import move
+from urllib.parse import unquote, urlparse
 
+import zstandard as zstd
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 repo_root_dir: Path = Path(__file__).parent.parent.parent
 sys.path.append(str(repo_root_dir))
 
-import os
 
 from src.common import tools
 
@@ -29,6 +33,7 @@ logger = tools.create_logger(log_path=logging_file_path, logger_name=__name__)
 DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 120
 DOWNLOAD_MAX_RETRIES = 5
+DECOMPRESS_CHUNK_SIZE = 8 * 1024 * 1024
 
 
 # To use the kaggle API you have to provide your username and a generated API key in the "kaggle_username" and "kaggle_api" variables in 'config.yaml'.
@@ -66,9 +71,20 @@ def _download_file_with_resume(
         request = urllib.request.Request(download_url, headers=request_headers.copy())
 
         if resume_from > 0:
+            logger.info(
+                f"Resuming download from byte offset {resume_from} "
+                f"(attempt {attempt}/{max_retries})."
+            )
+        elif attempt > 1:
+            logger.info(
+                f"Retrying download from scratch (attempt {attempt}/{max_retries})."
+            )
+
+        if resume_from > 0:
             request.add_header("Range", f"bytes={resume_from}-")
 
         try:
+            expected_size = None
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 status_code = getattr(response, "status", response.getcode())
 
@@ -80,16 +96,27 @@ def _download_file_with_resume(
                     continue
 
                 total_size = _get_total_size(response, resume_from)
+                expected_size = total_size
                 write_mode = "ab" if resume_from > 0 else "wb"
                 bytes_written = resume_from
 
-                with open(temp_file_path, write_mode) as temp_file:
-                    while True:
-                        chunk = response.read(chunk_size)
-                        if not chunk:
-                            break
-                        temp_file.write(chunk)
-                        bytes_written += len(chunk)
+                with tqdm(
+                    total=total_size,
+                    initial=resume_from,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc=f"Downloading {final_file_path.name}",
+                ) as progress_bar:
+                    with open(temp_file_path, write_mode) as temp_file:
+                        while True:
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            temp_file.write(chunk)
+                            chunk_length = len(chunk)
+                            bytes_written += chunk_length
+                            progress_bar.update(chunk_length)
 
                 if total_size is not None and bytes_written < total_size:
                     raise OSError(
@@ -97,6 +124,22 @@ def _download_file_with_resume(
                     )
 
             move(str(temp_file_path), str(final_file_path))
+
+            final_size = final_file_path.stat().st_size
+            if expected_size is not None and final_size != expected_size:
+                raise OSError(
+                    f"downloaded file size mismatch: got {final_size} bytes, expected {expected_size} bytes"
+                )
+
+            if expected_size is None:
+                logger.warning(
+                    "Server did not provide file size metadata; skipping final size validation."
+                )
+            else:
+                logger.info(
+                    f"Download finished with validated size {final_size} bytes."
+                )
+
             return final_file_path
 
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
@@ -115,6 +158,48 @@ def _download_file_with_resume(
             time.sleep(min(2**attempt, 30))
 
     raise RuntimeError(f"Failed to download {download_url}")
+
+
+def _resolve_download_file_name(download_url: str, data_name: str) -> str:
+    parsed_url = urlparse(download_url)
+    candidate_name = Path(unquote(parsed_url.path)).name
+
+    if candidate_name:
+        return candidate_name
+
+    return f"{data_name}.bin"
+
+
+def _decompress_zst_file(
+    source_path: Path, chunk_size: int = DECOMPRESS_CHUNK_SIZE
+) -> Path:
+    target_path = source_path.with_suffix("")
+
+    if target_path.exists():
+        target_path.unlink()
+
+    logger.info(f"Decompressing zst file: {source_path} -> {target_path}")
+    dctx = zstd.ZstdDecompressor()
+
+    with open(source_path, "rb") as compressed_file:
+        with dctx.stream_reader(compressed_file) as reader:
+            with open(target_path, "wb") as output_file:
+                with tqdm(
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc=f"Decompressing {source_path.name}",
+                ) as progress_bar:
+                    while True:
+                        chunk = reader.read(chunk_size)
+                        if not chunk:
+                            break
+                        output_file.write(chunk)
+                        progress_bar.update(len(chunk))
+
+    source_path.unlink(missing_ok=True)
+    logger.info(f"Decompression complete: {target_path}")
+    return target_path
 
 
 def kaggle_download_data(
@@ -180,7 +265,10 @@ def api_scraper_download_data(
         f"\n    Temporary path:  {temp_dir}"
     )
 
-    file_name: str = data_name + ".zip"
+    dataset_dir = save_path / data_name
+    file_name = _resolve_download_file_name(
+        download_url=download_url, data_name=data_name
+    )
     final_file_path = save_path / file_name
     temp_file_path = temp_dir / f"{file_name}.part"
 
@@ -192,9 +280,21 @@ def api_scraper_download_data(
         final_file_path=final_file_path,
     )
 
-    tools.rename_and_unzip_file(
-        zip_file_path=final_file_path, new_file_path=(save_path / data_name)
-    )
+    os.makedirs(dataset_dir, exist_ok=True)
+    if zipfile.is_zipfile(final_file_path):
+        tools.rename_and_unzip_file(
+            zip_file_path=final_file_path, new_file_path=dataset_dir
+        )
+    else:
+        final_dataset_file_path = dataset_dir / final_file_path.name
+        move(str(final_file_path), str(final_dataset_file_path))
+        logger.info(
+            f"Downloaded non-zip file moved to dataset directory: {final_dataset_file_path}"
+        )
+
+        if final_dataset_file_path.suffix == ".zst":
+            decompressed_file_path = _decompress_zst_file(final_dataset_file_path)
+            logger.info(f"Using decompressed dataset file: {decompressed_file_path}")
 
     logger.info(f"Successfully downloaded dataset files from: {download_url}!")
 

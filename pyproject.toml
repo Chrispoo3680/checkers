@@ -23,6 +23,7 @@ dependencies = [
     "torchinfo>=1.8.0",
     "tqdm>=4.67.3",
     "wget>=3.2",
+    "zstandard>=0.24.0",
 ]
 
 [tool.uv.sources]
