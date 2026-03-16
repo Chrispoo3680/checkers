@@ -62,8 +62,8 @@ def chess_loss(
 
 def value_correlation(v_pred, v_target):
 
-    v_pred = v_pred.view(-1)
-    v_target = v_target.view(-1)
+    v_pred = v_pred.view(-1).float()
+    v_target = v_target.view(-1).float()
 
     v_pred = v_pred - v_pred.mean()
     v_target = v_target - v_target.mean()
