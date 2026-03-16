@@ -58,6 +58,44 @@ class TqdmLoggingHandler(logging.Handler):
         tqdm.write(msg)
 
 
+class DeferredFileHandler(logging.Handler):
+    def __init__(self, env_var_name: str = "LOGGING_FILE_PATH"):
+        super().__init__()
+        self.env_var_name = env_var_name
+        self._resolved_path: Optional[str] = None
+        self._file_handler: Optional[logging.FileHandler] = None
+
+    def _ensure_file_handler(self) -> Optional[logging.FileHandler]:
+        log_path = os.environ.get(self.env_var_name)
+        if not log_path:
+            return None
+
+        if self._file_handler is not None and self._resolved_path == log_path:
+            return self._file_handler
+
+        if self._file_handler is not None:
+            self._file_handler.close()
+
+        file_handler = logging.FileHandler(log_path)
+        if self.formatter is not None:
+            file_handler.setFormatter(self.formatter)
+
+        self._resolved_path = log_path
+        self._file_handler = file_handler
+        return self._file_handler
+
+    def emit(self, record) -> None:
+        file_handler = self._ensure_file_handler()
+        if file_handler is not None:
+            file_handler.emit(record)
+
+    def close(self) -> None:
+        if self._file_handler is not None:
+            self._file_handler.close()
+            self._file_handler = None
+        super().close()
+
+
 def create_logger(
     logger_name: str, log_path: Optional[Union[str, Path]] = None
 ) -> logging.Logger:
@@ -74,6 +112,7 @@ def create_logger(
     # Set up logging
     logger = logging.getLogger(logger_name)
     logger.setLevel(level_dict[config["logging_level"]])
+    logger.propagate = False
 
     if logger.hasHandlers():
         logger.handlers.clear()
@@ -92,13 +131,19 @@ def create_logger(
         stream_handler.setFormatter(terminal_formatter)
         logger.addHandler(stream_handler)
 
-    # File handler for .log file output
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s:  %(message)s"
+    )
+
+    # File handler for .log file output. If the env var is set later,
+    # the deferred handler will start writing automatically.
+    deferred_file_handler = DeferredFileHandler()
+    deferred_file_handler.setFormatter(file_formatter)
+    logger.addHandler(deferred_file_handler)
+
     if log_path:
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s:  %(message)s")
-        )
-        logger.addHandler(file_handler)
+        os.environ["LOGGING_FILE_PATH"] = str(log_path)
+        deferred_file_handler._ensure_file_handler()
 
     return logger
 
