@@ -1,5 +1,6 @@
 import os
 import signal
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
@@ -98,6 +99,13 @@ class Trainer:
         self.temp_checkpoint_file_path = temp_checkpoint_file_path
         self.writer = writer
         self._interrupted = False
+        self._tqdm_enabled = (
+            self.rank == 0
+            and sys.stderr.isatty()
+            and os.environ.get("TQDM_DISABLE", "0") != "1"
+        )
+        # Nested bars are fragile on some remote terminals (e.g. PuTTY/WinSCP).
+        self._use_nested_tqdm = os.environ.get("TQDM_NESTED", "0") == "1"
 
     def _handle_sigint(self, signum, frame):
         self._interrupted = True
@@ -122,15 +130,16 @@ class Trainer:
         train_loss_acc = torch.zeros(1, device=self.device)
         interrupted = False
 
-        for batch, (X, pi_target, value_target) in enumerate(
-            tqdm(
-                self.train_dataloader,
-                position=1,
-                leave=False,
-                desc="Iterating through training batches",
-                disable=self.rank != 0,
-            )
-        ):
+        train_batch_iter = tqdm(
+            self.train_dataloader,
+            position=1 if self._use_nested_tqdm else 0,
+            leave=False,
+            desc="Iterating through training batches",
+            disable=not self._tqdm_enabled,
+            dynamic_ncols=True,
+        )
+
+        for batch, (X, pi_target, value_target) in enumerate(train_batch_iter):
             if batch % 50 == 0 and self._sync_interrupt_flag():
                 interrupted = True
                 break
@@ -210,15 +219,15 @@ class Trainer:
         )
         with amp_context:
             with torch.inference_mode():
-                for batch, (X, pi_target, value_target) in enumerate(
-                    tqdm(
-                        self.test_dataloader,
-                        position=1,
-                        leave=False,
-                        desc="Iterating through testing batches",
-                        disable=self.rank != 0,
-                    )
-                ):
+                test_batch_iter = tqdm(
+                    self.test_dataloader,
+                    position=1 if self._use_nested_tqdm else 0,
+                    leave=False,
+                    desc="Iterating through testing batches",
+                    disable=not self._tqdm_enabled,
+                    dynamic_ncols=True,
+                )
+                for batch, (X, pi_target, value_target) in enumerate(test_batch_iter):
                     if batch % 50 == 0 and self._sync_interrupt_flag():
                         interrupted = True
                         break
@@ -312,12 +321,19 @@ class Trainer:
         original_sigint_handler = signal.signal(signal.SIGINT, self._handle_sigint)
 
         try:
-            for epoch in tqdm(
-                range(epochs),
-                position=0,
-                desc="Iterating through epochs",
-                disable=self.rank != 0,
-            ):
+            epoch_iter = (
+                tqdm(
+                    range(epochs),
+                    position=0,
+                    desc="Iterating through epochs",
+                    disable=not self._tqdm_enabled,
+                    dynamic_ncols=True,
+                )
+                if self._use_nested_tqdm
+                else range(epochs)
+            )
+
+            for epoch in epoch_iter:
                 (
                     train_loss,
                     interrupted,

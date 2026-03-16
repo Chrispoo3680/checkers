@@ -78,20 +78,25 @@ def create_logger(
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    # Tqdm handler for terminal output
-    tqdm_handler = TqdmLoggingHandler()
-    tqdm_handler.setFormatter(
-        logging.Formatter("%(asctime)s  -  %(name)s  -  %(levelname)s:    %(message)s")
+    terminal_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s:  %(message)s"
     )
-    logger.addHandler(tqdm_handler)
+
+    # Use tqdm-aware logging only for interactive terminals.
+    if sys.stderr.isatty() and os.environ.get("TQDM_DISABLE", "0") != "1":
+        tqdm_handler = TqdmLoggingHandler()
+        tqdm_handler.setFormatter(terminal_formatter)
+        logger.addHandler(tqdm_handler)
+    else:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(terminal_formatter)
+        logger.addHandler(stream_handler)
 
     # File handler for .log file output
     if log_path:
         file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s  -  %(name)s  -  %(levelname)s:    %(message)s"
-            )
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s:  %(message)s")
         )
         logger.addHandler(file_handler)
 
