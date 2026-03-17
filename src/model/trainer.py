@@ -121,6 +121,28 @@ class Trainer:
 
         return bool(interrupted)
 
+    @staticmethod
+    def _unwrap_compiled_module(module: nn.Module) -> nn.Module:
+        """Return the underlying eager module when model is wrapped by torch.compile."""
+        current = module
+        while isinstance(current, nn.Module) and hasattr(current, "_orig_mod"):
+            unwrapped = getattr(current, "_orig_mod")
+            if not isinstance(unwrapped, nn.Module):
+                break
+            current = unwrapped
+        return current
+
+    @staticmethod
+    def _clean_state_dict_keys(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove torch.compile key prefixes so checkpoints load into eager models."""
+        cleaned: Dict[str, Any] = {}
+        for key, value in state_dict.items():
+            new_key = key
+            while new_key.startswith("_orig_mod."):
+                new_key = new_key[len("_orig_mod.") :]
+            cleaned[new_key] = value
+        return cleaned
+
     def train_step(self, epoch: int):
 
         self.train_dataloader.sampler.set_epoch(epoch)  # type: ignore
@@ -374,12 +396,17 @@ class Trainer:
                             es_score = value_score
                         else:  # "combined"
                             es_score = 0.5 * value_score + 0.5 * policy_top1_acc
-                        best_model_ref = (
+                        best_model_ref = self._unwrap_compiled_module(
                             self._ddp_model.module
                             if self._ddp_model is not None
                             else self.model
                         )
                         self.early_stopping(es_score, best_model_ref, epoch + 1)
+                        self.early_stopping.best_model_state = (
+                            self._clean_state_dict_keys(
+                                self.early_stopping.best_model_state
+                            )
+                        )
 
                     early_stop_flag = int(
                         self.early_stopping.early_stop or global_interrupted
