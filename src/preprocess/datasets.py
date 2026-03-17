@@ -57,10 +57,13 @@ class ChessDataset(Dataset):
 
     def _decode_encoded_row(
         self,
-        encoded_board_bytes: bytes,
-        encoded_policy_bytes: bytes,
-        encoded_value_bytes: bytes,
+        encoded_board_bytes: bytes | None,
+        encoded_policy_bytes: bytes | None,
+        encoded_value_bytes: bytes | None,
     ):
+        if encoded_board_bytes is None:
+            raise ValueError("encoded_board cannot be null in cached datasets")
+
         if self.decode_dtype == torch.float16:
             decoded_position = torch.from_numpy(
                 np.frombuffer(encoded_board_bytes, dtype=np.float16)
@@ -68,15 +71,23 @@ class ChessDataset(Dataset):
                 .copy()
             )
 
-            encoded_best_moves = torch.from_numpy(
-                np.frombuffer(encoded_policy_bytes, dtype=np.float16)
-                .reshape(8, 8, tools.POLICY_PLANES)
-                .copy()
-            )
+            if encoded_policy_bytes is None:
+                encoded_best_moves = torch.zeros(
+                    (8, 8, tools.POLICY_PLANES), dtype=torch.float16
+                )
+            else:
+                encoded_best_moves = torch.from_numpy(
+                    np.frombuffer(encoded_policy_bytes, dtype=np.float16)
+                    .reshape(8, 8, tools.POLICY_PLANES)
+                    .copy()
+                )
 
-            normalized_evaluation = torch.from_numpy(
-                np.frombuffer(encoded_value_bytes, dtype=np.float16).copy()
-            )
+            if encoded_value_bytes is None:
+                normalized_evaluation = torch.zeros(1, dtype=torch.float16)
+            else:
+                normalized_evaluation = torch.from_numpy(
+                    np.frombuffer(encoded_value_bytes, dtype=np.float16).copy()
+                )
         else:
             decoded_position = torch.from_numpy(
                 np.frombuffer(encoded_board_bytes, dtype=np.float16)
@@ -85,18 +96,26 @@ class ChessDataset(Dataset):
                 .copy()
             )
 
-            encoded_best_moves = torch.from_numpy(
-                np.frombuffer(encoded_policy_bytes, dtype=np.float16)
-                .astype(np.float32)
-                .reshape(8, 8, tools.POLICY_PLANES)
-                .copy()
-            )
+            if encoded_policy_bytes is None:
+                encoded_best_moves = torch.zeros(
+                    (8, 8, tools.POLICY_PLANES), dtype=torch.float32
+                )
+            else:
+                encoded_best_moves = torch.from_numpy(
+                    np.frombuffer(encoded_policy_bytes, dtype=np.float16)
+                    .astype(np.float32)
+                    .reshape(8, 8, tools.POLICY_PLANES)
+                    .copy()
+                )
 
-            normalized_evaluation = torch.from_numpy(
-                np.frombuffer(encoded_value_bytes, dtype=np.float16)
-                .astype(np.float32)
-                .copy()
-            )
+            if encoded_value_bytes is None:
+                normalized_evaluation = torch.zeros(1, dtype=torch.float32)
+            else:
+                normalized_evaluation = torch.from_numpy(
+                    np.frombuffer(encoded_value_bytes, dtype=np.float16)
+                    .astype(np.float32)
+                    .copy()
+                )
 
         normalized_evaluation = torch.nan_to_num(
             normalized_evaluation, nan=0.0, posinf=1.0, neginf=-1.0
@@ -110,9 +129,9 @@ class ChessDataset(Dataset):
         row_idx = index % self.chunk_size
         row = self._get_chunk(chunk_idx).row(row_idx)
         return self._decode_encoded_row(
-            cast(bytes, row[0]),
-            cast(bytes, row[1]),
-            cast(bytes, row[2]),
+            cast(bytes | None, row[0]),
+            cast(bytes | None, row[1]),
+            cast(bytes | None, row[2]),
         )
 
     def __getitems__(self, indices: Sequence[int]):
@@ -131,9 +150,9 @@ class ChessDataset(Dataset):
             for sample_pos, row_idx in requests:
                 row = chunk_df.row(row_idx)
                 samples[sample_pos] = self._decode_encoded_row(
-                    cast(bytes, row[0]),
-                    cast(bytes, row[1]),
-                    cast(bytes, row[2]),
+                    cast(bytes | None, row[0]),
+                    cast(bytes | None, row[1]),
+                    cast(bytes | None, row[2]),
                 )
 
         return cast(list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]], samples)
