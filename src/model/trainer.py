@@ -486,4 +486,7 @@ class Trainer:
             if self.temp_checkpoint_file_path.exists():
                 os.remove(self.temp_checkpoint_file_path)
 
-        return results, self.early_stopping.best_model_state
+        return {
+            key: val[: self.early_stopping.best_score_epoch]
+            for key, val in results.items()
+        }, self.early_stopping.best_model_state
