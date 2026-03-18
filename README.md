@@ -195,6 +195,56 @@ python train.py --model-name checkers --specified-datasets stockfish_position_ev
 python play_against_ai_terminal.py --model-name checkers4.2 --num-simulations 400
 ```
 
+### 5) Run Elo benchmarks (cutechess-cli + Ordo)
+
+This repo now includes a reproducible Elo workflow under `scripts/elo/`:
+
+- `run_cutechess_match.sh`: runs engine-vs-engine matches and writes PGN + log.
+- `run_ordo_rating.sh`: computes ratings from the match PGN with Ordo.
+- `run_elo_pipeline.sh`: runs both steps in sequence.
+
+Setup:
+
+```bash
+cp scripts/elo/elo.env.example scripts/elo/elo.env
+```
+
+Edit `scripts/elo/elo.env` and set at minimum:
+
+- `ENGINE_A_CMD` to your Checkers command (for example `./checkers_engine --model-name checkers4.2 ...`)
+- `ENGINE_B_CMD` to `stockfish` or your Stash binary
+- `OPENINGS_FILE` to your `8moves_v3.pgn` absolute path
+
+Run matches only:
+
+```bash
+scripts/elo/run_cutechess_match.sh
+```
+
+Run Ordo only (uses `RUN_TAG` from env or latest run under `results/elo/`):
+
+```bash
+scripts/elo/run_ordo_rating.sh
+```
+
+Run full pipeline:
+
+```bash
+scripts/elo/run_elo_pipeline.sh
+```
+
+Outputs are created under `results/elo/<RUN_TAG>/`:
+
+- `matches.pgn` (or `PGN_NAME`)
+- `cutechess.log`
+- `ordo_ratings.txt`
+
+Notes:
+
+- The scripts are host-agnostic: set `CUTECHESS_BIN`/`ORDO_BIN` to absolute paths if binaries are not on `PATH`.
+- Engine options are configured with `ENGINE_A_OPTIONS` and `ENGINE_B_OPTIONS` as semicolon-separated `Name=Value` pairs.
+- You can run these scripts on your other Linux machine by copying this repo there and editing `scripts/elo/elo.env` for that host.
+
 ## Experiment Tracking
 
 Training runs produce:
