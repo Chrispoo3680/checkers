@@ -245,6 +245,46 @@ Notes:
 - Engine options are configured with `ENGINE_A_OPTIONS` and `ENGINE_B_OPTIONS` as semicolon-separated `Name=Value` pairs.
 - You can run these scripts on your other Linux machine by copying this repo there and editing `scripts/elo/elo.env` for that host.
 
+#### Rating Pool (Multi-Engine Gauntlet)
+
+For more reliable Elo estimation, use a **rating pool** of engines at different levels:
+
+```bash
+cp scripts/elo/elo.env.preset-rating-pool scripts/elo/elo.env
+```
+
+Edit the pool definition (Stockfish skill levels, Stash, etc.):
+
+```bash
+scripts/elo/run_elo_gauntlet.sh
+```
+
+This will:
+
+1. Run matches against each pooled opponent sequentially.
+2. Combine all PGNs.
+3. Compute composite Elo using Ordo.
+
+**Why use a pool?**
+
+- If your engine loses 95%+ against one super-strong engine, Elo is hard to estimate.
+- Multiple opponents at different levels give you a bell curve of results (30-70% expected scores).
+- Smaller error bars and better ranking reliability.
+
+**Recommended pool (for ~1000-1200 total games, < 25 Elo error):**
+
+- Stockfish skill 12 (medium): 400 games
+- Stockfish skill 18 (strong): 300 games
+- Stash (very strong): 200-300 games
+- Stockfish skill 8 (weak): 200 games (optional, for variance)
+
+**Stockfish skill level mapping** (0–20):
+
+- Skill 0–5: ~1000 Elo (very weak)
+- Skill 8–10: ~2100 Elo (club player)
+- Skill 12–14: ~2600–2800 Elo (master)
+- Skill 18–20: ~3400+ Elo (superhuman)
+
 ## Experiment Tracking
 
 Training runs produce:
