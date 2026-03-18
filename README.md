@@ -259,6 +259,23 @@ Edit the pool definition (Stockfish skill levels, Stash, etc.):
 scripts/elo/run_elo_gauntlet.sh
 ```
 
+You can now switch between two ready performance profiles:
+
+```bash
+# Fast throughput profile (quick ranking)
+cp scripts/elo/elo.env.fast-filter scripts/elo/elo.env
+scripts/elo/run_elo_gauntlet.sh
+
+# Final calibration profile (tighter Elo reporting)
+cp scripts/elo/elo.env.final-calibration scripts/elo/elo.env
+scripts/elo/run_elo_gauntlet.sh
+```
+
+Profile intent:
+
+- `elo.env.fast-filter`: very high throughput (high concurrency, short TC, lower simulations).
+- `elo.env.final-calibration`: slower but more stable Elo estimates for release decisions.
+
 This will:
 
 1. Run matches against each pooled opponent sequentially.
