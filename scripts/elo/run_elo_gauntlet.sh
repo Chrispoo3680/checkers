@@ -111,17 +111,17 @@ fi
 temp_pgn_files=()
 
 for engine_idx in "${pool_engines[@]}"; do
-    local engine_name_var="POOL_ENGINE_${engine_idx}_NAME"
-    local engine_cmd_var="POOL_ENGINE_${engine_idx}_CMD"
-    local engine_proto_var="POOL_ENGINE_${engine_idx}_PROTO"
-    local engine_options_var="POOL_ENGINE_${engine_idx}_OPTIONS"
-    local engine_games_var="POOL_ENGINE_${engine_idx}_games"
+    engine_name_var="POOL_ENGINE_${engine_idx}_NAME"
+    engine_cmd_var="POOL_ENGINE_${engine_idx}_CMD"
+    engine_proto_var="POOL_ENGINE_${engine_idx}_PROTO"
+    engine_options_var="POOL_ENGINE_${engine_idx}_OPTIONS"
+    engine_games_var="POOL_ENGINE_${engine_idx}_games"
 
-    local engine_name="${!engine_name_var:-}"
-    local engine_cmd="${!engine_cmd_var:-}"
-    local engine_proto="${!engine_proto_var:=uci}"
-    local engine_options="${!engine_options_var:-}"
-    local engine_games="${!engine_games_var:=100}"
+    engine_name="${!engine_name_var:-}"
+    engine_cmd="${!engine_cmd_var:-}"
+    engine_proto="${!engine_proto_var:=uci}"
+    engine_options="${!engine_options_var:-}"
+    engine_games="${!engine_games_var:=100}"
 
     if [[ -z "$engine_name" ]] || [[ -z "$engine_cmd" ]]; then
         continue
