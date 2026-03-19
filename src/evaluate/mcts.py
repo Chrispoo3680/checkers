@@ -6,6 +6,7 @@ library for board state management.
 """
 
 import math
+import time
 from typing import Dict, List, Optional
 
 import chess
@@ -143,11 +144,21 @@ class MCTS:
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def run(self, root_board: chess.Board) -> Dict[chess.Move, int]:
+    def run(
+        self,
+        root_board: chess.Board,
+        max_time_s: float | None = None,
+        min_simulations: int = 1,
+    ) -> Dict[chess.Move, int]:
         """Run MCTS from *root_board* and return visit counts.
 
         Args:
             root_board: The current board position.  **Not** mutated.
+            max_time_s: Optional wall-clock budget in seconds. Search stops
+                when this deadline is reached, after at least
+                ``min_simulations`` playouts.
+            min_simulations: Minimum number of playouts to execute before the
+                time limit may terminate search.
 
         Returns:
             A dict mapping each legal move to the number of times it was
@@ -161,7 +172,19 @@ class MCTS:
         root.visit_count = 1
         root.value_sum = value  # seed with initial network evaluation
 
-        for _ in range(self.num_simulations):
+        min_simulations = max(0, int(min_simulations))
+        deadline = None
+        if max_time_s is not None and max_time_s > 0:
+            deadline = time.perf_counter() + float(max_time_s)
+
+        for sim_idx in range(self.num_simulations):
+            if (
+                deadline is not None
+                and sim_idx >= min_simulations
+                and time.perf_counter() >= deadline
+            ):
+                break
+
             node = root
             board = root_board.copy()
             search_path: List[Node] = [node]

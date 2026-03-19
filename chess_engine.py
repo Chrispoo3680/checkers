@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import chess
@@ -22,8 +23,9 @@ from src.model.models import CheckersNetV3
 ENGINE_NAME = "Checkers-UCI"
 ENGINE_AUTHOR = "Christoffer Brandt"
 DEFAULT_MODEL_NAME = "checkers4.2"
-DEFAULT_NUM_SIMULATIONS = 1600
+DEFAULT_NUM_SIMULATIONS = 800
 DEFAULT_C_PUCT = 2.5
+DEFAULT_MOVE_OVERHEAD_MS = 100
 
 CONFIG = tools.load_config()
 
@@ -112,6 +114,7 @@ class UCICheckersEngine:
 
         self.num_simulations = max(1, int(default_sims))
         self.c_puct = float(default_c_puct)
+        self.move_overhead_ms = DEFAULT_MOVE_OVERHEAD_MS
 
     @staticmethod
     def _send(line: str) -> None:
@@ -231,6 +234,36 @@ class UCICheckersEngine:
 
         return base
 
+    def _time_budget_for_go_ms(self, limits: dict[str, int | bool]) -> int | None:
+        """Estimate a per-move wall-clock budget in milliseconds.
+
+        Returns ``None`` when no time constraints are available.
+        """
+        movetime = limits.get("movetime")
+        if isinstance(movetime, int) and movetime > 0:
+            return max(1, movetime - self.move_overhead_ms)
+
+        if limits.get("infinite") is True:
+            return None
+
+        side_time_key = "wtime" if self.board.turn == chess.WHITE else "btime"
+        side_inc_key = "winc" if self.board.turn == chess.WHITE else "binc"
+
+        remaining_ms = limits.get(side_time_key)
+        increment_ms = limits.get(side_inc_key)
+        moves_to_go = limits.get("movestogo")
+
+        if not isinstance(remaining_ms, int) or remaining_ms <= 0:
+            return None
+
+        mtg = moves_to_go if isinstance(moves_to_go, int) and moves_to_go > 0 else 30
+        inc = increment_ms if isinstance(increment_ms, int) and increment_ms > 0 else 0
+
+        # Conservative split with increment support.
+        raw_budget = remaining_ms // max(10, mtg) + inc // 2
+        raw_budget = max(10, raw_budget)
+        return max(1, raw_budget - self.move_overhead_ms)
+
     def _handle_uci(self) -> None:
         self._send(f"id name {ENGINE_NAME} ({self.model_name})")
         self._send(f"id author {ENGINE_AUTHOR}")
@@ -238,6 +271,9 @@ class UCICheckersEngine:
             f"option name NumSimulations type spin default {self.num_simulations} min 1 max 100000"
         )
         self._send(f"option name CPuct type string default {self.c_puct}")
+        self._send(
+            f"option name MoveOverheadMs type spin default {self.move_overhead_ms} min 0 max 5000"
+        )
         self._send("uciok")
 
     def _handle_setoption(self, tokens: list[str]) -> None:
@@ -271,6 +307,12 @@ class UCICheckersEngine:
         if option_name == "cpuct":
             try:
                 self.c_puct = float(option_value)
+            except ValueError:
+                return
+
+        if option_name == "moveoverheadms":
+            try:
+                self.move_overhead_ms = max(0, int(option_value))
             except ValueError:
                 return
 
@@ -311,7 +353,11 @@ class UCICheckersEngine:
                     break
 
     @torch.no_grad()
-    def _choose_bestmove(self, simulations: int | None = None) -> chess.Move | None:
+    def _choose_bestmove(
+        self,
+        simulations: int | None = None,
+        max_time_ms: int | None = None,
+    ) -> chess.Move | None:
         legal_moves = list(self.board.legal_moves)
         if not legal_moves:
             return None
@@ -325,18 +371,38 @@ class UCICheckersEngine:
             c_puct=self.c_puct,
             device=str(self.device),
         )
-        visits = mcts.run(self.board)
+
+        max_time_s = None
+        if isinstance(max_time_ms, int) and max_time_ms > 0:
+            max_time_s = max_time_ms / 1000.0
+
+        search_start = time.perf_counter()
+        visits = mcts.run(self.board, max_time_s=max_time_s, min_simulations=1)
+        elapsed_ms = int((time.perf_counter() - search_start) * 1000)
+
+        # Provide lightweight UCI info for debugging time management.
+        total_visits = sum(visits.values())
+        if max_time_ms is not None:
+            self._send(
+                f"info string search_ms {elapsed_ms} budget_ms {max_time_ms} visits {total_visits}"
+            )
+        else:
+            self._send(f"info string search_ms {elapsed_ms} visits {total_visits}")
 
         if not visits:
             return legal_moves[0]
 
-        return max(visits, key=visits.get)
+        return max(visits, key=lambda move: visits[move])
 
     def _handle_go(self, tokens: list[str]) -> None:
         limits = self._parse_go_limits(tokens)
         simulations = self._sims_for_go(limits)
+        budget_ms = self._time_budget_for_go_ms(limits)
 
-        best_move = self._choose_bestmove(simulations=simulations)
+        best_move = self._choose_bestmove(
+            simulations=simulations,
+            max_time_ms=budget_ms,
+        )
         if best_move is None:
             self._send("bestmove 0000")
             return
