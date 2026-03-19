@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         default="white",
         help="Which side you play.",
     )
+    parser.add_argument(
+        "--move-format",
+        choices=["uci", "san"],
+        default="uci",
+        help="Input notation for your moves.",
+    )
     return parser.parse_args()
 
 
@@ -161,7 +167,7 @@ def get_model_move(
     if not visit_counts:
         return None, 0.0, 0.0
 
-    best_move = max(visit_counts, key=visit_counts.get)
+    best_move = max(visit_counts, key=lambda move: visit_counts[move])
     total_visits = sum(visit_counts.values())
     visit_share = visit_counts[best_move] / total_visits if total_visits > 0 else 0.0
 
@@ -177,6 +183,7 @@ def get_model_move(
 def print_help() -> None:
     print("Commands:")
     print("  <uci>  Play a move in UCI, e.g. e2e4, g1f3, e7e8q")
+    print("  <san>  Play a move in SAN, e.g. e4, Nf3, O-O, exd5, e8=Q")
     print("  z      Undo (removes AI + human move when possible)")
     print("  r      Reset game")
     print("  s      Switch side (and reset game)")
@@ -232,6 +239,13 @@ def parse_uci_move(move_text: str) -> chess.Move | None:
         return None
 
 
+def parse_san_move(board: chess.Board, move_text: str) -> chess.Move | None:
+    try:
+        return board.parse_san(move_text)
+    except ValueError:
+        return None
+
+
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -260,6 +274,7 @@ def main() -> None:
 
     print(f"Using device: {device}")
     print(f"Loaded checkpoint: {checkpoint_path}")
+    print(f"Move input format: {args.move_format.upper()}")
     print_help()
 
     while True:
@@ -301,17 +316,19 @@ def main() -> None:
             game_over, status_msg = game_status(board, ai_to_move=False)
             continue
 
-        user_input = input("Your move (UCI or command): ").strip().lower()
+        notation_prompt = "UCI" if args.move_format == "uci" else "SAN"
+        user_input_raw = input(f"Your move ({notation_prompt} or command): ").strip()
+        user_input_cmd = user_input_raw.lower()
 
-        if user_input in {"q", "quit", "exit"}:
+        if user_input_cmd in {"q", "quit", "exit"}:
             print("Goodbye.")
             return
 
-        if user_input in {"h", "help"}:
+        if user_input_cmd in {"h", "help"}:
             print_help()
             continue
 
-        if user_input in {"r", "reset"}:
+        if user_input_cmd in {"r", "reset"}:
             board.reset()
             game_over = False
             status_msg = ""
@@ -321,7 +338,7 @@ def main() -> None:
             print("Game reset.")
             continue
 
-        if user_input in {"s", "switch"}:
+        if user_input_cmd in {"s", "switch"}:
             human_color = chess.BLACK if human_color == chess.WHITE else chess.WHITE
             ai_color = chess.BLACK if ai_color == chess.WHITE else chess.WHITE
             board.reset()
@@ -334,7 +351,7 @@ def main() -> None:
             print(f"Switched side. You now play {side}.")
             continue
 
-        if user_input in {"z", "undo"}:
+        if user_input_cmd in {"z", "undo"}:
             if len(board.move_stack) >= 2:
                 board.pop()
                 board.pop()
@@ -353,9 +370,16 @@ def main() -> None:
             print("Game is over. Use 'r' to reset, 's' to switch side, or 'q' to quit.")
             continue
 
-        move = parse_uci_move(user_input)
+        if args.move_format == "uci":
+            move = parse_uci_move(user_input_raw.lower())
+        else:
+            move = parse_san_move(board, user_input_raw)
+
         if move is None:
-            print("Invalid UCI move format. Example: e2e4, g1f3, e7e8q")
+            if args.move_format == "uci":
+                print("Invalid UCI move format. Example: e2e4, g1f3, e7e8q")
+            else:
+                print("Invalid SAN move format. Example: e4, Nf3, O-O, exd5, e8=Q")
             continue
 
         if move not in board.legal_moves:
