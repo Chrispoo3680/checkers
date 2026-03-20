@@ -135,7 +135,7 @@ def format_move_log(board: chess.Board) -> str:
         black_move = move_texts[i + 1] if i + 1 < len(move_texts) else ""
         lines.append(f"{move_num}. {white_move} {black_move}".rstrip())
 
-    return "\n".join(lines)
+    return "\n".join(lines[-10:])
 
 
 def game_status(board: chess.Board, ai_to_move: bool) -> tuple[bool, str]:
