@@ -203,10 +203,11 @@ Hyperparameters:
 1. Increase lichess_puzzles effective sample usage (currently still conservative in many runs).
 2. Ensure cp-weighted softmax is consistently used for all multi-move engine-supervised sources (not only fixed weights).
 3. Clear/rebuild old caches created with pre-migration (20480) move indexing.
-4. Run a clean benchmark sweep comparing:
-   - old 20480 policy checkpoints
-   - new 8x8x73 policy checkpoints
-     using identical evaluation protocol.
+4. Run Elo benchmarks to track model progress:
+   - Use `scripts/elo/run_elo_gauntlet.sh` with `elo.env.preset-rating-pool`.
+   - Compare old 20480 policy checkpoints vs new 8x8x73 policy checkpoints.
+   - Use a multi-engine rating pool (Stockfish skill levels + Stash) for reliable Elo.
+   - Log results in `results/elo/` for model history tracking.
 
 ---
 

@@ -1,5 +1,5 @@
 # DATA
-data_path: data/
+data_path: ../../../mnt/shared/checkers_data/data/
 
 # DATASETS
 ## Kaggle Datasets
@@ -21,21 +21,17 @@ lichess_db_eval_dataset_download_url: https://database.lichess.org/lichess_db_ev
 lichess_db_eval_dataset_name: lichess_db_eval
 
 # MODELS
-model_path: models/
+model_path: ../../../mnt/shared/checkers_data/models/
 
 # CHECKPOINTS
-temp_checkpoint_path: temp_checkpoints/
+temp_checkpoint_path: ../../../mnt/shared/checkers_data/temp_checkpoints/
 
 # RESULTS
-results_path: results/
+results_path: ../../../mnt/shared/checkers_data/results/
 
 # TEMPFILE
-tempfile_path: temp/
+tempfile_path: ../../../mnt/shared/checkers_data/temp/
 
 # LOGGING
-logging_path: logs/
+logging_path: ../../../mnt/shared/checkers_data/logs/
 logging_level: debug
-
-# API KEYS
-kaggle_username: YOUR KAGGLE USERNAME # Instructions on how to get in "/src/data/download.py".
-kaggle_api_key: INSERT API KEY HERE # Instructions on how to get in "/src/data/download.py".
